@@ -47,7 +47,6 @@ local HttpService = game:GetService("HttpService")
 local Workspace = game:GetService("Workspace")
 local TeleportService = game:GetService("TeleportService")
 local GuiService = game:GetService("GuiService")
-local RunService = game:GetService("RunService")
 
 getgenv().AnimeDiceRuntime = (tonumber(getgenv().AnimeDiceRuntime) or 0) + 1
 local runtime = getgenv().AnimeDiceRuntime
@@ -144,6 +143,8 @@ local defaultSettings = {
     ["Auto Use Boost"] = true,
     ["Auto Redeem Codes"] = true,
     ["FPS Boost"] = true,
+    ["Anti-AFK"] = true,
+    ["Black Screen"] = true,
     ["Tower"] = "Dragon Tower",
     ["Tower Cleared"] = 0,
 }
@@ -316,14 +317,12 @@ local Net = {
     ClaimQuest = Network.QuestService.RE.Claim,
     EquipBest = Network.PlotService.RE.EquipBest,
     CollectBalance = Network.PlotService.RE.CollectBalance,
-    LevelUpSlot = Network.PlotService.RE.LevelUpSlot,
     BuyUpgrade = Network.RE.BuyUpgrade,
     Rebirth = Network.RebirthService.RE.Rebirth,
     BuyDice = Network.DiceShopService.RE.BuyDice,
     EquipDice = Network.DiceShopService.RE.EquipDice,
     SellInventory = Network.SellService.RF.SellInventory,
     EquipBestTower = Network.Towers.RE.EquipBestTowerTeam,
-    PlayTower = Network.Towers.RF.PlayTower,
     CancelTower = Network.Towers.RF.CancelTower,
     CompleteTowerFloor = Network.Towers.RF.CompleteTowerFloor,
     BuyQuest = Network.QuestService.RE.Buy,
@@ -709,18 +708,9 @@ local function applyBlackScreen()
     if rolling then
         setVis(rolling:FindFirstChild("DarkBackground"))
     end
-    local label = Farm.blackLabel
-    if label and label.setText then
-        if hide then
-            pcall(label.setText, "Black screen: Hidden")
-        else
-            pcall(label.setText, "Black screen: Visible")
-        end
+    if type(Farm.refreshBlack) == "function" then
+        Farm.refreshBlack()
     end
-end
-
-local function killRareCutscene()
-    applyBlackScreen()
 end
 
 local function towerFolder()
@@ -1453,11 +1443,7 @@ local function noteFloorComplete(floor)
     updateFloorLabel()
 end
 
-local function hookFloorTracker()
-end
-
 local function trackTowerFloor()
-    hookFloorTracker()
     if inTower() then
         local floor = readTowerFloor()
         if floor > 0 then
@@ -1608,6 +1594,125 @@ local function itemAmount(data, name)
     return tonumber(item.amount) or 0
 end
 
+local BlackRows = {
+    { name = "Rolls", image = "rbxassetid://134047270790894", color = Color3.fromRGB(255, 214, 80) },
+    { name = "Gems", image = "rbxassetid://99406696477560", color = Color3.fromRGB(80, 230, 255) },
+    { name = "Trait Reroll", image = "rbxassetid://133531024200552", color = Color3.fromRGB(186, 120, 255) },
+    { name = "Tickets", image = "rbxassetid://84743623119270", color = Color3.fromRGB(255, 176, 60) },
+    { name = "Jackpot Spin", image = "rbxassetid://76821109669261", color = Color3.fromRGB(255, 86, 168) },
+}
+
+local function blackAmounts(data)
+    local rolls = 0
+    if type(data) == "table" then
+        rolls = tonumber(data.Rolls) or 0
+    end
+    return {
+        Rolls = rolls,
+        Gems = itemAmount(data, "Gems"),
+        ["Trait Reroll"] = itemAmount(data, "Trait Reroll"),
+        Tickets = itemAmount(data, "Tickets"),
+        ["Jackpot Spin"] = itemAmount(data, "Jackpot Spin"),
+    }
+end
+
+local function ensureBlackGui()
+    local gui = Farm.blackGui
+    if gui and gui.Parent then
+        return gui
+    end
+    local playerGui = plr:FindFirstChild("PlayerGui")
+    if not playerGui then
+        return nil
+    end
+    local old = playerGui:FindFirstChild("AnimeDiceBlack")
+    if old then
+        old:Destroy()
+    end
+    gui = Instance.new("ScreenGui")
+    gui.Name = "AnimeDiceBlack"
+    gui.ResetOnSpawn = false
+    gui.IgnoreGuiInset = false
+    gui.DisplayOrder = 500
+    gui.Parent = playerGui
+    local frame = Instance.new("Frame")
+    frame.Name = "Cover"
+    frame.Size = UDim2.fromScale(1, 1)
+    frame.BackgroundColor3 = Color3.new(0, 0, 0)
+    frame.BorderSizePixel = 0
+    frame.ZIndex = 1
+    frame.Parent = gui
+    local stats = Instance.new("Frame")
+    stats.Name = "Stats"
+    stats.BackgroundTransparency = 1
+    stats.AnchorPoint = Vector2.new(0.5, 0.5)
+    stats.Position = UDim2.new(0.5, 0, 0.5, 0)
+    stats.Size = UDim2.fromOffset(760, 340)
+    stats.Parent = frame
+    local list = Instance.new("UIListLayout")
+    list.FillDirection = Enum.FillDirection.Vertical
+    list.HorizontalAlignment = Enum.HorizontalAlignment.Center
+    list.VerticalAlignment = Enum.VerticalAlignment.Center
+    list.Padding = UDim.new(0, 8)
+    list.Parent = stats
+    local rowLabels = {}
+    for _, row in BlackRows do
+        local line = Instance.new("Frame")
+        line.Name = row.name
+        line.BackgroundTransparency = 1
+        line.AutomaticSize = Enum.AutomaticSize.X
+        line.Size = UDim2.fromOffset(0, 56)
+        line.Parent = stats
+        local rowList = Instance.new("UIListLayout")
+        rowList.FillDirection = Enum.FillDirection.Horizontal
+        rowList.VerticalAlignment = Enum.VerticalAlignment.Center
+        rowList.Padding = UDim.new(0, 12)
+        rowList.SortOrder = Enum.SortOrder.LayoutOrder
+        rowList.Parent = line
+        local icon = Instance.new("ImageLabel")
+        icon.BackgroundTransparency = 1
+        icon.LayoutOrder = 1
+        icon.Size = UDim2.fromOffset(52, 52)
+        icon.Image = row.image
+        icon.ScaleType = Enum.ScaleType.Fit
+        icon.Parent = line
+        local text = Instance.new("TextLabel")
+        text.Name = "Amount"
+        text.BackgroundTransparency = 1
+        text.LayoutOrder = 2
+        text.AutomaticSize = Enum.AutomaticSize.X
+        text.Size = UDim2.fromOffset(0, 56)
+        text.Font = Enum.Font.GothamBold
+        text.TextSize = 48
+        text.TextXAlignment = Enum.TextXAlignment.Left
+        text.TextColor3 = row.color
+        text.Text = row.name .. ": 0"
+        text.Parent = line
+        rowLabels[row.name] = text
+    end
+    Farm.blackGui = gui
+    Farm.blackCover = frame
+    Farm.blackRows = rowLabels
+    return gui
+end
+
+local function updateBlackScreen(data)
+    if not ensureBlackGui() then
+        return
+    end
+    Farm.blackCover.Visible = Settings["Black Screen"] ~= false
+    local amounts = blackAmounts(data or getReplica())
+    for _, row in BlackRows do
+        local shown = row.name .. ": " .. tostring(amounts[row.name] or 0)
+        local rowLabel = Farm.blackRows[row.name]
+        if rowLabel and rowLabel.Text ~= shown then
+            rowLabel.Text = shown
+        end
+    end
+end
+
+Farm.refreshBlack = updateBlackScreen
+
 local function shopCost(itemName)
     if type(QuestConfig) ~= "table" then
         return nil
@@ -1632,9 +1737,6 @@ local function buyJackpot(data)
     if not cost or cost <= 0 then
         return false
     end
-    if itemAmount(data, "Jackpot Spin") >= 1 then
-        return false
-    end
     local tickets = itemAmount(data, "Tickets")
     if tickets < cost then
         return false
@@ -1657,13 +1759,6 @@ local function useSpinItem(data, itemName, key)
     fireRemote(Net.UseSpin, itemName)
     farmLog(key, "Use " .. itemName)
     return true
-end
-
-local function useJackpotSpin(data)
-    if Settings["Auto Jackpot Spin"] ~= true then
-        return false
-    end
-    return useSpinItem(data, "Jackpot Spin", "useJackpot")
 end
 
 local function useLuckySpin(data)
@@ -2004,6 +2099,7 @@ task.spawn(function()
         local okLoop, loopErr = xpcall(function()
         pcall(applySkipAnimation)
         local data = getReplica()
+        updateBlackScreen(data)
         local autoOk, autoState = syncAutoRoll()
         local claimed = claimReadyQuests()
         local didCash = claimCash(data)
@@ -2016,14 +2112,7 @@ task.spawn(function()
         local didNextTower = startNextTower(data)
         local didCode = redeemCodes(data)
         local didSpin = useLuckySpin(data)
-        local didJackpotUse = false
-        local didJackpot = false
-        if not didSpin then
-            didJackpotUse = useJackpotSpin(data)
-            if not didJackpotUse then
-                didJackpot = buyJackpot(data)
-            end
-        end
+        local didJackpot = buyJackpot(data)
         local didBoost = useBoosts(data)
         local didRebirth = doRebirth(data)
 
@@ -2041,8 +2130,6 @@ task.spawn(function()
             setStatus("Dice shop")
         elseif didSpin then
             setStatus("Using Lucky Spin")
-        elseif didJackpotUse then
-            setStatus("Using Jackpot Spin")
         elseif didJackpot then
             setStatus("Buying Jackpot Spin")
         elseif didBoost then
@@ -2104,6 +2191,25 @@ pcall(function()
         if isDisconnectText(text) then
             doRejoin(text)
         end
+    end)
+end)
+
+if getgenv().AnimeDiceAntiAfk then
+    pcall(function()
+        getgenv().AnimeDiceAntiAfk:Disconnect()
+    end)
+end
+getgenv().AnimeDiceAntiAfk = plr.Idled:Connect(function()
+    if runtime ~= getgenv().AnimeDiceRuntime then
+        return
+    end
+    if Settings["Anti-AFK"] ~= true then
+        return
+    end
+    local VirtualUser = game:GetService("VirtualUser")
+    pcall(function()
+        VirtualUser:CaptureController()
+        VirtualUser:ClickButton2(Vector2.new(0, 0))
     end)
 end)
 
@@ -2183,24 +2289,31 @@ do
         end,
     })
 
-    Main.Button({
+    Main.CheckBox({
         title = "Black Screen",
-        description = "Hides or shows the black cutscene overlay.",
-        searchAliases = { "fade", "dark", "overlay" },
+        description = "Shows rolls, gems, trait rerolls, tickets, and Jackpot Spins on a black screen.",
+        searchAliases = { "overlay", "fade", "dark" },
         isVisible = true,
-        buttonTitle = "Hide / Show",
-        callback = function()
-            Settings["Hide Black Screen"] = Settings["Hide Black Screen"] ~= true
-            applyBlackScreen()
+        isChecked = Settings["Black Screen"] ~= false,
+        callback = function(value)
+            Settings["Black Screen"] = value == true
+            if type(Farm.refreshBlack) == "function" then
+                Farm.refreshBlack()
+            end
         end,
     })
 
-    Farm.blackLabel = Main.Label({
-        title = "Black screen: Hidden",
-        searchAliases = { "overlay", "fade" },
+    Main.CheckBox({
+        title = "Anti-AFK",
+        description = "Stops Roblox from kicking you for being idle.",
+        searchAliases = { "idle", "kick", "afk" },
         isVisible = true,
-        isBold = false,
+        isChecked = Settings["Anti-AFK"] == true,
+        callback = function(value)
+            Settings["Anti-AFK"] = value == true
+        end,
     })
+
     applyBlackScreen()
     updateFloorLabel()
 
@@ -2421,7 +2534,7 @@ do
 
     Spins.CheckBox({
         title = "Auto Jackpot Spin",
-        description = "Buys Jackpot Spin with quest tickets and keeps using it.",
+        description = "Exchanges quest tickets for Jackpot Spin and does not use them.",
         searchAliases = { "exchange", "tickets", "quest shop" },
         isVisible = true,
         isChecked = Settings["Auto Jackpot Spin"] == true,
@@ -2469,4 +2582,29 @@ do
 
     Farm.uiReady = true
     pcall(applyTowerHidden)
+
+    local rbxGui = game:GetService("CoreGui"):FindFirstChild("RobloxGui")
+    local etc = rbxGui and rbxGui:FindFirstChild("Nousigi Hub GUI [ETC]")
+    local rabbit = etc and etc:FindFirstChild("btn-hide")
+    if rabbit and rabbit:IsA("GuiButton") and type(getconnections) == "function" then
+        for _, conn in getconnections(rabbit.MouseButton1Click) do
+            pcall(function()
+                conn:Disconnect()
+            end)
+        end
+        if Farm.rabbitClick then
+            pcall(function()
+                Farm.rabbitClick:Disconnect()
+            end)
+        end
+        Farm.rabbitClick = rabbit.MouseButton1Click:Connect(function()
+            if runtime ~= getgenv().AnimeDiceRuntime then
+                return
+            end
+            Settings["Black Screen"] = Settings["Black Screen"] == false
+            if type(Farm.refreshBlack) == "function" then
+                Farm.refreshBlack()
+            end
+        end)
+    end
 end
