@@ -1170,83 +1170,6 @@ local function diceShop(data)
     return false
 end
 
-local function teamPower(data)
-    local dmg = 0
-    local hp = 0
-    if type(data) ~= "table" or type(data.TowerTeam) ~= "table" or type(data.Inventory) ~= "table" then
-        return 0, 0
-    end
-    for _, uid in data.TowerTeam do
-        local entry = data.Inventory[uid]
-        if type(entry) == "table" then
-            local ok, cfg = pcall(EntryRegistry.getEntryConfig, entry.name)
-            if ok and type(cfg) == "table" then
-                if type(cfg.damage) == "function" then
-                    local okD, value = pcall(cfg.damage, entry.attributes)
-                    if okD then
-                        dmg = dmg + (tonumber(value) or 0)
-                    end
-                end
-                if type(cfg.health) == "function" then
-                    local okH, value = pcall(cfg.health, entry.attributes)
-                    if okH then
-                        hp = hp + (tonumber(value) or 0)
-                    end
-                end
-            end
-        end
-    end
-    return dmg, hp
-end
-
-local function beatsFloor(teamDmg, teamHp, enemyHp, enemyDmg)
-    if teamDmg <= 0 then
-        return false
-    end
-    if enemyHp <= 0 then
-        return true
-    end
-    local hpLeft = teamHp
-    local enemyLeft = enemyHp
-    for _ = 1, 30 do
-        enemyLeft = enemyLeft - teamDmg
-        if enemyLeft <= 0 then
-            return true
-        end
-        hpLeft = hpLeft - enemyDmg
-        if hpLeft <= 0 then
-            return false
-        end
-    end
-    return false
-end
-
-local function winnableFloors(cfg, teamDmg, teamHp)
-    if type(cfg) ~= "table" or type(cfg.enemyHealth) ~= "function" then
-        return 0
-    end
-    local maxF = tonumber(cfg.maxFloors) or 50
-    local order = tonumber(cfg.order) or 0
-    if order >= 90 then
-        return 0
-    end
-    local best = 0
-    for floor = 1, maxF do
-        local eh = 0
-        local ed = 0
-        pcall(function()
-            eh = tonumber(cfg.enemyHealth(floor)) or 0
-            ed = tonumber(cfg.enemyDamage(floor)) or 0
-        end)
-        if beatsFloor(teamDmg, teamHp, eh, ed) then
-            best = floor
-        else
-            break
-        end
-    end
-    return best
-end
-
 local function towerNames()
     local names = {}
     if type(TowerCatalog) ~= "table" or type(TowerCatalog.GetAll) ~= "function" then
@@ -1278,39 +1201,9 @@ local function towerNames()
     return names
 end
 
-local function towerConfig(name)
-    if type(name) ~= "string" or type(TowerCatalog) ~= "table" or type(TowerCatalog.GetAll) ~= "function" then
-        return nil
-    end
-    local all = TowerCatalog.GetAll()
-    if type(all) ~= "table" then
-        return nil
-    end
-    return all[name]
-end
-
-local function pickFarmTower(data)
+local function lowestTower()
     local names = towerNames()
-    local cleared = tonumber(Farm.towerCleared) or 0
-    if cleared < 0 then
-        cleared = 0
-    end
-    if cleared >= #names then
-        return names[#names], 0
-    end
-    local frontier = names[cleared + 1]
-    if cleared == 0 or Farm.towerRetreat ~= true then
-        return frontier, 0
-    end
-    local dmg, hp = teamPower(data)
-    local power = dmg + hp
-    local floors = winnableFloors(towerConfig(frontier), dmg, hp)
-    -- ponytail: retry the next tower after any power gain once the sim sees a floor. Swap in a real combat read if losses loop.
-    if power > (tonumber(Farm.towerRetreatPower) or 0) and floors > 0 then
-        Farm.towerRetreat = false
-        return frontier, floors
-    end
-    return names[cleared], floors
+    return names[1]
 end
 
 local function inTower()
@@ -1453,70 +1346,21 @@ local function trackTowerFloor()
     end
 end
 
-local function towerIndex(name)
-    local names = towerNames()
-    for index, towerName in names do
-        if towerName == name then
-            return index, names
-        end
-    end
-    return 0, names
-end
-
-local function finishTowerRun(data)
-    local cfg = towerConfig(Farm.towerRunName)
-    local maxFloors = 0
-    if type(cfg) == "table" then
-        maxFloors = tonumber(cfg.maxFloors) or 0
-    end
-    local reached = Farm.towerRunMax or 0
-    local low = Farm.towerRunLow
-    local won = maxFloors > 0 and reached >= maxFloors and low ~= nil and low < maxFloors
-    local index = towerIndex(Farm.towerRunName)
-    local cleared = tonumber(Farm.towerCleared) or 0
-    if won and index > cleared then
-        Farm.towerCleared = index
-        Settings["Tower Cleared"] = index
-        Farm.towerRetreat = false
-        farmLog("towerWin", "Cleared " .. tostring(Farm.towerRunName))
-    elseif not won and index > 0 and index == cleared + 1 and cleared > 0 then
-        local dmg, hp = teamPower(data)
-        Farm.towerRetreat = true
-        Farm.towerRetreatPower = dmg + hp
-        farmLog("towerLose", "Lost " .. tostring(Farm.towerRunName) .. " at floor " .. tostring(reached))
-    end
-    Farm.towerArmed = false
-    Farm.towerWasIn = false
-    Farm.towerRunMax = 0
-    Farm.towerRunLow = nil
-end
-
-local function settleTowerRun(data)
+local function settleTowerRun()
     if inTower() then
         if Farm.towerArmed then
             Farm.towerWasIn = true
-            local floor = readTowerFloor()
-            if floor > 0 then
-                if Farm.towerRunLow == nil or floor < Farm.towerRunLow then
-                    Farm.towerRunLow = floor
-                end
-                if floor < (Farm.towerRunMax or 0) then
-                    Farm.towerRunMax = floor
-                end
-                if floor > (Farm.towerRunMax or 0) then
-                    Farm.towerRunMax = floor
-                end
-            end
         end
         return
     end
     if Farm.towerArmed and Farm.towerWasIn then
-        finishTowerRun(data)
+        Farm.towerArmed = false
+        Farm.towerWasIn = false
     end
 end
 
 local function startNextTower(data)
-    settleTowerRun(data)
+    settleTowerRun()
     if Settings["Auto Next Tower"] ~= true then
         return false
     end
@@ -1541,18 +1385,8 @@ local function startNextTower(data)
     if not ready("towerNext", 3.2) then
         return false
     end
-    local name = Settings["Tower"]
-    if Settings["Auto Pick Tower"] == true then
-        local picked, floors = pickFarmTower(data)
-        if type(picked) == "string" and picked ~= "" then
-            name = picked
-            Settings["Tower"] = picked
-            Farm.towerFloors = floors
-        end
-    end
-    if type(name) ~= "string" or name == "" then
-        name = "Dragon Tower"
-    end
+    local name = lowestTower()
+    Settings["Tower"] = name
     fireRemote(Net.EquipBestTower)
     local started = false
     if type(TowerController) == "table" and type(TowerController.startTower) == "function" then
