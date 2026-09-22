@@ -1690,7 +1690,21 @@ local function ensureBlackGui()
         text.Parent = line
         rowLabels[row.name] = text
     end
+    local status = Instance.new("TextLabel")
+    status.Name = "Status"
+    status.BackgroundTransparency = 1
+    status.AnchorPoint = Vector2.new(0.5, 1)
+    status.Position = UDim2.new(0.5, 0, 1, -20)
+    status.Size = UDim2.new(0.92, 0, 0, 36)
+    status.Font = Enum.Font.GothamBold
+    status.TextSize = 22
+    status.TextColor3 = Color3.fromRGB(230, 230, 230)
+    status.TextXAlignment = Enum.TextXAlignment.Center
+    status.Text = ""
+    status.ZIndex = 2
+    status.Parent = frame
     Farm.blackGui = gui
+    Farm.blackStatus = status
     Farm.blackCover = frame
     Farm.blackRows = rowLabels
     return gui
@@ -1708,6 +1722,10 @@ local function updateBlackScreen(data)
         if rowLabel and rowLabel.Text ~= shown then
             rowLabel.Text = shown
         end
+    end
+    local statusText = Farm.status or "Starting"
+    if Farm.blackStatus and Farm.blackStatus.Text ~= statusText then
+        Farm.blackStatus.Text = statusText
     end
 end
 
@@ -2219,392 +2237,46 @@ local Library = mainLib.Init({
     density = "auto",
 })
 
-do
-    local Page = Library.createPage({
-        pageName = "Farm",
-        pageTitle = "Anime Dice",
-        pageIcon = "dices",
-    })
-
-    local Main = Page.createSection({
-        sectionName = "Rolling",
-        sectionIcon = "dices",
-        sectionSearch = true,
-        sectionCollapsed = false,
-    })
-
-    Farm.statusLabel = Main.Label({
-        title = "Status: Starting | Current Floor 0 | Tower",
-        searchAliases = { "state", "current", "floor" },
-        isVisible = true,
-        isBold = true,
-    })
-
-    Farm.towerDisplay = Main.Label({
-        title = "Tower: --  |  Current Floor 0  |  Idle  |  Run 0  |  Session 0  |  Best 0",
-        searchAliases = { "tower", "floor", "display", "wins", "current" },
-        isVisible = true,
-        isBold = true,
-    })
-
-    Main.CheckBox({
-        title = "Auto Roll",
-        description = "Turns on the game auto roll so dice keep rolling while you have cash.",
-        searchAliases = { "autoroll", "dice", "spin" },
-        isVisible = true,
-        isChecked = Settings["Auto Roll"] == true,
-        callback = function(value)
-            Settings["Auto Roll"] = value == true
-            Farm.pending.autoRoll = 0
-        end,
-    })
-
-    Main.CheckBox({
-        title = "FPS Boost",
-        description = "Strips textures, effects, and other players on your client. Scripts, remotes, and your character stay. Rejoin to bring graphics back.",
-        searchAliases = { "lag", "fps", "texture", "players", "optimize" },
-        isVisible = true,
-        isChecked = Settings["FPS Boost"] == true,
-        callback = function(value)
-            Settings["FPS Boost"] = value == true
-            if value == true and type(getgenv().AnimeDiceBoostFps) == "function" then
-                task.spawn(getgenv().AnimeDiceBoostFps)
-            end
-        end,
-    })
-
-    Main.CheckBox({
-        title = "Skip Animation",
-        description = "Removes all roll animations, including 1 in 1m+ cutscenes.",
-        searchAliases = { "hide", "cutscene", "fast", "million" },
-        isVisible = true,
-        isChecked = Settings["Skip Animation"] == true,
-        callback = function(value)
-            Settings["Skip Animation"] = value == true
-            applySkipAnimation()
-            if value ~= true then
-                hideRollingGui(false)
-            end
-            applyBlackScreen()
-        end,
-    })
-
-    Main.CheckBox({
-        title = "Black Screen",
-        description = "Shows rolls, gems, trait rerolls, tickets, and Jackpot Spins on a black screen.",
-        searchAliases = { "overlay", "fade", "dark" },
-        isVisible = true,
-        isChecked = Settings["Black Screen"] ~= false,
-        callback = function(value)
-            Settings["Black Screen"] = value == true
-            if type(Farm.refreshBlack) == "function" then
-                Farm.refreshBlack()
-            end
-        end,
-    })
-
-    Main.CheckBox({
-        title = "Anti-AFK",
-        description = "Stops Roblox from kicking you for being idle.",
-        searchAliases = { "idle", "kick", "afk" },
-        isVisible = true,
-        isChecked = Settings["Anti-AFK"] == true,
-        callback = function(value)
-            Settings["Anti-AFK"] = value == true
-        end,
-    })
-
-    applyBlackScreen()
-    updateFloorLabel()
-
-    Main.CheckBox({
-        title = "Auto Claim Quests",
-        description = "Claims finished daily and weekly quests as soon as they are complete.",
-        searchAliases = { "daily", "weekly", "tickets", "reward" },
-        isVisible = true,
-        isChecked = Settings["Auto Claim Quests"] == true,
-        callback = function(value)
-            Settings["Auto Claim Quests"] = value == true
-        end,
-    })
-
-    local Plot = Page.createSection({
-        sectionName = "Plot",
-        sectionIcon = "land-plot",
-        sectionSearch = true,
-        sectionCollapsed = false,
-    })
-
-    Plot.CheckBox({
-        title = "Auto Equip Best",
-        description = "Puts your strongest units on the plot and the tower team.",
-        searchAliases = { "place", "best", "slots", "tower" },
-        isVisible = true,
-        isChecked = Settings["Auto Equip Best"] == true,
-        callback = function(value)
-            Settings["Auto Equip Best"] = value == true
-            Farm.pending.equipBest = 0
-        end,
-    })
-
-    Plot.CheckBox({
-        title = "Auto Claim Cash",
-        description = "Collects cash from every placed unit on your plot.",
-        searchAliases = { "money", "collect", "tien" },
-        isVisible = true,
-        isChecked = Settings["Auto Claim Cash"] == true,
-        callback = function(value)
-            Settings["Auto Claim Cash"] = value == true
-            Farm.pending.cash = 0
-        end,
-    })
-
-    Plot.CheckBox({
-        title = "Auto Upgrade",
-        description = "Buys the next affordable upgrade on the upgrade tree.",
-        searchAliases = { "tree", "luck", "damage" },
-        isVisible = true,
-        isChecked = Settings["Auto Upgrade"] == true,
-        callback = function(value)
-            Settings["Auto Upgrade"] = value == true
-            Farm.pending.upgrade = 0
-        end,
-    })
-
-    Plot.CheckBox({
-        title = "Auto Rebirth",
-        description = "Rebirths when you can afford the next rebirth.",
-        searchAliases = { "prestige", "reset" },
-        isVisible = true,
-        isChecked = Settings["Auto Rebirth"] == true,
-        callback = function(value)
-            Settings["Auto Rebirth"] = value == true
-        end,
-    })
-
-    Plot.CheckBox({
-        title = "Auto Sell Units",
-        description = "Sells extra units that are not placed on your plot or tower team.",
-        searchAliases = { "autosell", "junk", "spare" },
-        isVisible = true,
-        isChecked = Settings["Auto Sell Units"] == true,
-        callback = function(value)
-            Settings["Auto Sell Units"] = value == true
-            Farm.pending.sell = 0
-        end,
-    })
-
-    local Shop = Page.createSection({
-        sectionName = "Shop And Tower",
-        sectionIcon = "store",
-        sectionSearch = true,
-        sectionCollapsed = false,
-    })
-
-    Farm.floorLabel = Shop.Label({
-        title = "Current Floor: 0  |  This run: 0  |  Session: 0  |  Best: 0  |  Tower",
-        searchAliases = { "floor", "wins", "complete", "track" },
-        isVisible = true,
-        isBold = true,
-    })
-
-    Shop.CheckBox({
-        title = "Auto Dice Shop",
-        description = "Buys the next dice you can afford and equips your best owned dice.",
-        searchAliases = { "luck", "shop" },
-        isVisible = true,
-        isChecked = Settings["Auto Dice Shop"] == true,
-        callback = function(value)
-            Settings["Auto Dice Shop"] = value == true
-            Farm.pending.dice = 0
-        end,
-    })
-
-    Shop.CheckBox({
-        title = "Display Tower",
-        description = "Shows the tower fight screen while farming floors.",
-        searchAliases = { "hud", "screen", "hide", "combat" },
-        isVisible = true,
-        isChecked = Settings["Display Tower"] == true,
-        callback = function(value)
-            Settings["Display Tower"] = value == true
-            if Farm.uiReady == true then
-                pcall(applyTowerHidden)
-            end
-        end,
-    })
-
-    Shop.CheckBox({
-        title = "Auto Next Tower",
-        description = "Starts another tower after the current run ends. It does not skip floors.",
-        searchAliases = { "again", "continue", "next", "replay" },
-        isVisible = true,
-        isChecked = Settings["Auto Next Tower"] == true,
-        callback = function(value)
-            Settings["Auto Next Tower"] = value == true
-            Farm.pending.towerNext = 0
-        end,
-    })
-
-    Shop.CheckBox({
-        title = "Auto Pick Tower",
-        description = "Clears towers in order. If the next tower loses, it replays the last cleared tower until your team is stronger.",
-        searchAliases = { "easy", "winrate", "dragon" },
-        isVisible = true,
-        isChecked = Settings["Auto Pick Tower"] == true,
-        callback = function(value)
-            Settings["Auto Pick Tower"] = value == true
-            Farm.pending.tower = 0
-        end,
-    })
-
-    local names = towerNames()
-    local defaultTower = Settings["Tower"]
-    local validTower = false
-    for _, name in names do
-        if name == defaultTower then
-            validTower = true
+local rbxGui = game:GetService("CoreGui"):FindFirstChild("RobloxGui")
+local rabbit = nil
+if rbxGui then
+    for _, child in rbxGui:GetDescendants() do
+        if child.Name == "btn-hide" and child:IsA("GuiButton") then
+            rabbit = child
             break
         end
     end
-    if not validTower then
-        defaultTower = names[1]
-        Settings["Tower"] = defaultTower
+end
+if rabbit then
+    local old = plr.PlayerGui:FindFirstChild("AnimeDiceRabbit")
+    if old then
+        old:Destroy()
     end
-
-    Shop.Select({
-        title = "Tower",
-        dropdowntitle = "Tower",
-        description = "Tower used when you start a fight yourself.",
-        searchAliases = { "dungeon", "stage" },
-        isVisible = true,
-        search = true,
-        options = names,
-        defaultValue = defaultTower,
-        callback = function(value)
-            if type(value) == "string" and value ~= "" then
-                Settings["Tower"] = value
-                Farm.pending.tower = 0
-            end
-        end,
-    })
-
-    Shop.CheckBox({
-        title = "Auto Rejoin",
-        description = "Rejoins a new server if the client disconnects, so the game and executor come back.",
-        searchAliases = { "reconnect", "teleport", "disconnect" },
-        isVisible = true,
-        isChecked = Settings["Auto Rejoin"] == true,
-        callback = function(value)
-            Settings["Auto Rejoin"] = value == true
-        end,
-    })
-
-    Shop.CheckBox({
-        title = "Auto Execute On Rejoin",
-        description = "Saves the script and runs it again automatically after a rejoin or teleport.",
-        searchAliases = { "autoexec", "queue", "inject" },
-        isVisible = true,
-        isChecked = Settings["Auto Execute On Rejoin"] == true,
-        callback = function(value)
-            Settings["Auto Execute On Rejoin"] = value == true
-            if value == true then
-                queueAutoExec()
-            end
-        end,
-    })
-
-    Shop.Button({
-        title = "Rejoin Now",
-        description = "Leaves and rejoins this game on the current client.",
-        searchAliases = { "test", "retry", "server" },
-        isVisible = true,
-        buttonTitle = "Rejoin",
-        callback = function()
-            doRejoin("manual")
-        end,
-    })
-
-    local Spins = Page.createSection({
-        sectionName = "Spins And Codes",
-        sectionIcon = "ticket",
-        sectionSearch = true,
-        sectionCollapsed = false,
-    })
-
-    Spins.CheckBox({
-        title = "Auto Jackpot Spin",
-        description = "Exchanges quest tickets for Jackpot Spin and does not use them.",
-        searchAliases = { "exchange", "tickets", "quest shop" },
-        isVisible = true,
-        isChecked = Settings["Auto Jackpot Spin"] == true,
-        callback = function(value)
-            Settings["Auto Jackpot Spin"] = value == true
-            Farm.pending.jackpot = 0
-        end,
-    })
-
-    Spins.CheckBox({
-        title = "Auto Use Lucky Spin",
-        description = "Rolls every Lucky Spin you already have from codes or free rewards. It does not buy them.",
-        searchAliases = { "100x", "spin" },
-        isVisible = true,
-        isChecked = Settings["Auto Use Lucky Spin"] == true,
-        callback = function(value)
-            Settings["Auto Use Lucky Spin"] = value == true
-            Farm.pending.luckySpin = 0
-        end,
-    })
-
-    Spins.CheckBox({
-        title = "Auto Use Boost",
-        description = "Uses luck, income, and damage boosts from your inventory.",
-        searchAliases = { "potion", "buff" },
-        isVisible = true,
-        isChecked = Settings["Auto Use Boost"] == true,
-        callback = function(value)
-            Settings["Auto Use Boost"] = value == true
-            Farm.pending.boost = 0
-        end,
-    })
-
-    Spins.CheckBox({
-        title = "Auto Redeem Codes",
-        description = "Redeems every working code that you have not used yet.",
-        searchAliases = { "promo", "gift" },
-        isVisible = true,
-        isChecked = Settings["Auto Redeem Codes"] == true,
-        callback = function(value)
-            Settings["Auto Redeem Codes"] = value == true
-            Farm.pending.codes = 0
-        end,
-    })
-
-    Farm.uiReady = true
-    pcall(applyTowerHidden)
-
-    local rbxGui = game:GetService("CoreGui"):FindFirstChild("RobloxGui")
-    local etc = rbxGui and rbxGui:FindFirstChild("Nousigi Hub GUI [ETC]")
-    local rabbit = etc and etc:FindFirstChild("btn-hide")
-    if rabbit and rabbit:IsA("GuiButton") and type(getconnections) == "function" then
-        for _, conn in getconnections(rabbit.MouseButton1Click) do
-            pcall(function()
-                conn:Disconnect()
-            end)
+    local holder = Instance.new("ScreenGui")
+    holder.Name = "AnimeDiceRabbit"
+    holder.ResetOnSpawn = false
+    holder.DisplayOrder = 600
+    holder.Parent = plr.PlayerGui
+    local logo = rabbit:Clone()
+    logo.Parent = holder
+    logo.MouseButton1Click:Connect(function()
+        if runtime ~= getgenv().AnimeDiceRuntime then
+            return
         end
-        if Farm.rabbitClick then
-            pcall(function()
-                Farm.rabbitClick:Disconnect()
-            end)
+        Settings["Black Screen"] = Settings["Black Screen"] == false
+        if type(Farm.refreshBlack) == "function" then
+            Farm.refreshBlack()
         end
-        Farm.rabbitClick = rabbit.MouseButton1Click:Connect(function()
-            if runtime ~= getgenv().AnimeDiceRuntime then
-                return
-            end
-            Settings["Black Screen"] = Settings["Black Screen"] == false
-            if type(Farm.refreshBlack) == "function" then
-                Farm.refreshBlack()
-            end
-        end)
+    end)
+end
+if rbxGui then
+    local hub = rbxGui:FindFirstChild("Nousigi Hub GUI")
+    if hub then
+        hub:Destroy()
+    end
+    local etc = rbxGui:FindFirstChild("Nousigi Hub GUI [ETC]")
+    if etc then
+        etc:Destroy()
     end
 end
+pcall(applyTowerHidden)
