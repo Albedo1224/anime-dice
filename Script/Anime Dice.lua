@@ -1314,6 +1314,13 @@ local function pickFarmTower(data)
 end
 
 local function inTower()
+    if type(debug) == "table" and type(debug.getupvalue) == "function"
+    and type(TowerController) == "table" and type(TowerController.startTower) == "function" then
+        local ok, running = pcall(debug.getupvalue, TowerController.startTower, 1)
+        if ok and type(running) == "boolean" then
+            return running
+        end
+    end
     local tower = towerFolder()
     if not tower then
         return false
@@ -1322,19 +1329,15 @@ local function inTower()
     if hidden and hidden:IsA("GuiObject") and hidden.Visible then
         return true
     end
+    if not Farm.towerArmed and not Farm.towerWasIn then
+        return false
+    end
     local screen = tower:FindFirstChild("Screen")
     if not (screen and screen:IsA("GuiObject") and screen.Visible) then
         return false
     end
     local floor = screen:FindFirstChild("Floor")
-    if floor and floor:IsA("TextLabel") then
-        local text = floor.Text or ""
-        if string.find(text, "Floor") then
-            return true
-        end
-    end
-    local card = screen:FindFirstChild("Card")
-    if card and card:IsA("GuiObject") and card.Visible then
+    if floor and floor:IsA("TextLabel") and string.find(floor.Text or "", "Floor") then
         return true
     end
     return false
@@ -1558,14 +1561,13 @@ local function startNextTower(data)
     end
     if not started then
         local tries = Farm.towerStuckTries or 0
-        if not inTower() and tries < 2 then
-            if tries == 0 then
-                invokeRemote(Net.CancelTower)
-            end
-            invokeRemote(Net.CompleteTowerFloor)
-            Farm.towerStuckTries = tries + 1
+        if tries == 0 then
+            invokeRemote(Net.CancelTower)
             farmLog("tower", "Clear stuck tower")
+        elseif tries == 1 then
+            invokeRemote(Net.CompleteTowerFloor)
         end
+        Farm.towerStuckTries = (tries + 1) % 3
         return false
     end
     Farm.towerStuckTries = 0
