@@ -172,6 +172,7 @@ else
     end
     fillMissing(Settings, defaultSettings)
 end
+Settings["Black Screen"] = true
 getgenv().Settings = Settings
 
 do
