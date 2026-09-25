@@ -134,6 +134,7 @@ local defaultSettings = {
     ["Auto Dice Shop"] = true,
     ["Auto Pick Tower"] = true,
     ["Auto Next Tower"] = true,
+    ["Auto Infinity"] = true,
     ["Auto Rejoin"] = true,
     ["Auto Execute On Rejoin"] = true,
     ["Auto Jackpot Spin"] = true,
@@ -353,6 +354,7 @@ local UpgradeTree = tryRequire(Framework.Features.Upgrades.TreeStructure)
 local Rebirths = tryRequire(Framework.Features.Rebirth.Rebirths)
 local TowerCatalog = tryRequire(Framework.Features.Towers.Towers)
 local TowerController = tryRequire(Framework.Features.Towers.TowerController)
+local DataController = tryRequire(Framework.Features.Data.DataController)
 local SpinController = tryRequire(Framework.Features.Inventory.Kinds.Spin.SpinController)
 local BuffController = tryRequire(Framework.Features.Buffs.BuffController)
 local EntryRegistry = tryRequire(Framework.Features.Inventory.EntryRegistry)
@@ -456,7 +458,14 @@ local function currentFloorLine()
     if type(towerName) ~= "string" or towerName == "" then
         towerName = Settings["Tower"] or "Tower"
     end
-    return "Current Floor " .. tostring(Farm.floor or 0) .. " | " .. tostring(towerName)
+    local line = "Current Floor " .. tostring(Farm.floor or 0) .. " | " .. tostring(towerName)
+    if Farm.questHold then
+        line = line .. " | Quests first"
+        if type(Farm.questNote) == "string" and Farm.questNote ~= "" then
+            line = line .. " " .. Farm.questNote
+        end
+    end
+    return line
 end
 
 local function setStatus(text)
@@ -863,14 +872,85 @@ local function doRoll(data)
     return true
 end
 
+local function questScore(tbl)
+    local progress = rawget(tbl, "progress")
+    if type(progress) ~= "table" then
+        return -1
+    end
+    local total = 0
+    for _, value in progress do
+        total = total + (tonumber(value) or 0)
+    end
+    return total
+end
+
+local function freshQuestTable(expiresAt)
+    -- ponytail: the quest node keeps a frozen copy. Scan once a second for the table that is still counting.
+    if type(filtergc) ~= "function" or type(expiresAt) ~= "number" then
+        return nil
+    end
+    local now = tick()
+    local cache = Farm.questScan
+    if type(cache) ~= "table" or now - (cache.at or 0) > 1 then
+        cache = { at = now, byExp = {} }
+        local ok, list = pcall(filtergc, "table", {
+            Keys = { "expiresAt", "progress", "claimed" },
+        })
+        if ok and type(list) == "table" then
+            for _, tbl in list do
+                local exp = rawget(tbl, "expiresAt")
+                if type(exp) == "number" and questScore(tbl) >= 0 then
+                    local prev = cache.byExp[exp]
+                    if not prev or questScore(tbl) > questScore(prev) then
+                        cache.byExp[exp] = tbl
+                    end
+                end
+            end
+        end
+        Farm.questScan = cache
+    end
+    return cache.byExp[expiresAt]
+end
+
+local function questLive(periodName, data)
+    local seeded = nil
+    if type(DataController) == "table" and type(DataController.Quests) == "table" then
+        local node = DataController.Quests[periodName]
+        if type(node) == "table" then
+            local ok, called = pcall(function()
+                return node()
+            end)
+            if ok and type(called) == "table" and type(rawget(called, "progress")) == "table" then
+                seeded = called
+            end
+            if not seeded then
+                local raw = rawget(node, "___X")
+                if type(raw) == "table" and type(raw[periodName]) == "table" then
+                    seeded = raw[periodName]
+                end
+            end
+        end
+    end
+    if not seeded and type(data) == "table" and type(data.Quests) == "table" then
+        local live = data.Quests[periodName]
+        if type(live) == "table" then
+            seeded = live
+        end
+    end
+    if type(seeded) == "table" then
+        local fresh = freshQuestTable(tonumber(seeded.expiresAt))
+        if type(fresh) == "table" then
+            return fresh
+        end
+    end
+    return seeded
+end
+
 local function claimReadyQuests()
     if Settings["Auto Claim Quests"] ~= true then
         return 0
     end
     local data = getReplica()
-    if type(data) ~= "table" or type(data.Quests) ~= "table" then
-        return 0
-    end
     if type(QuestConfig) ~= "table" then
         return 0
     end
@@ -881,7 +961,7 @@ local function claimReadyQuests()
     local claimed = 0
     local serverNow = Workspace:GetServerTimeNow()
     for periodName, period in periods do
-        local live = data.Quests[periodName]
+        local live = questLive(periodName, data)
         if type(live) == "table" and type(period) == "table" and type(period.quests) == "table" then
             local expiresAt = tonumber(live.expiresAt)
             if expiresAt and serverNow < expiresAt then
@@ -1206,6 +1286,77 @@ local function lowestTower()
     return names[1]
 end
 
+local function questsFinished(data)
+    if type(QuestConfig) ~= "table" or type(QuestConfig.Periods) ~= "table" then
+        return false
+    end
+    local periods = QuestConfig.Periods
+    local serverNow = Workspace:GetServerTimeNow()
+    local names = { "Daily", "Weekly" }
+    for _, periodName in names do
+        local period = periods[periodName]
+        local live = questLive(periodName, data)
+        if type(period) ~= "table" or type(period.quests) ~= "table" or type(live) ~= "table" then
+            return false
+        end
+        local expiresAt = tonumber(live.expiresAt)
+        if not expiresAt or expiresAt <= serverNow then
+            return false
+        end
+        local progress = live.progress
+        local already = live.claimed
+        for _, quest in period.quests do
+            local id = quest and quest.id
+            local target = tonumber(quest and quest.target) or 0
+            if id == "Towers" then
+                local have = 0
+                if type(progress) == "table" then
+                    have = tonumber(progress[id]) or 0
+                end
+                local isClaimed = type(already) == "table" and already[id] == true
+                if have < target and not isClaimed then
+                    return false, periodName .. " " .. id .. " " .. tostring(math.floor(have)) .. "/" .. tostring(math.floor(target))
+                end
+            end
+        end
+    end
+    return true, ""
+end
+
+local function wantedTower(data)
+    if Settings["Auto Infinity"] == true then
+        local done, note = questsFinished(data)
+        Farm.questNote = note or ""
+        if done then
+            return "Infinity Tower"
+        end
+    else
+        Farm.questNote = ""
+    end
+    return lowestTower()
+end
+
+local function runningTowerName()
+    if type(debug) == "table" and type(debug.getupvalue) == "function"
+    and type(TowerController) == "table" and type(TowerController.startTower) == "function" then
+        local i = 1
+        while i <= 12 do
+            local ok, value = pcall(debug.getupvalue, TowerController.startTower, i)
+            if not ok then
+                break
+            end
+            if type(value) == "string" and value ~= "" then
+                return value
+            end
+            i = i + 1
+        end
+    end
+    if type(Farm.towerRunName) == "string" then
+        return Farm.towerRunName
+    end
+    return ""
+end
+
 local function inTower()
     if type(debug) == "table" and type(debug.getupvalue) == "function"
     and type(TowerController) == "table" and type(TowerController.startTower) == "function" then
@@ -1362,9 +1513,23 @@ end
 local function startNextTower(data)
     settleTowerRun()
     if Settings["Auto Next Tower"] ~= true then
+        Farm.questHold = false
         return false
     end
+    local name = wantedTower(data)
+    Farm.questHold = Settings["Auto Infinity"] == true and name ~= "Infinity Tower"
     if inTower() then
+        local running = runningTowerName()
+        if running ~= "" and running ~= name then
+            if ready("towerLeave", 3.2) then
+                invokeRemote(Net.CancelTower)
+                Farm.towerArmed = false
+                Farm.towerWasIn = false
+                Farm.towerStuckCancel = false
+                farmLog("tower", "Leave " .. running .. " for " .. name)
+            end
+            return false
+        end
         Farm.towerActive = true
         return false
     end
@@ -1385,7 +1550,6 @@ local function startNextTower(data)
     if not ready("towerNext", 3.2) then
         return false
     end
-    local name = lowestTower()
     Settings["Tower"] = name
     fireRemote(Net.EquipBestTower)
     local started = false
@@ -2092,6 +2256,10 @@ if rabbit then
     holder.DisplayOrder = 600
     holder.Parent = plr.PlayerGui
     local logo = rabbit:Clone()
+    local note = logo:FindFirstChild("toggle-note")
+    if note then
+        note:Destroy()
+    end
     logo.Parent = holder
     logo.MouseButton1Click:Connect(function()
         if runtime ~= getgenv().AnimeDiceRuntime then
