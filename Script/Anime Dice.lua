@@ -328,7 +328,7 @@ local Net = {
     BuyQuest = Network.QuestService.RE.Buy,
     UseSpin = Network.SpinService.RE.Use,
     UseBoost = Network.BoostService.RE.Use,
-    RedeemCode = Network.MonetizationService.RE.RedeemCode,
+    RedeemCode = Network.CodesService.RE.RedeemCode,
     RollDice = Network.RollService.RF.RollDice,
 }
 
@@ -359,7 +359,7 @@ local DataController = tryRequire(Framework.Features.Data.DataController)
 local SpinController = tryRequire(Framework.Features.Inventory.Kinds.Spin.SpinController)
 local BuffController = tryRequire(Framework.Features.Buffs.BuffController)
 local EntryRegistry = tryRequire(Framework.Features.Inventory.EntryRegistry)
-local MonetizationConfig = tryRequire(Framework.Features.Monetization.MonetizationConfig)
+local CodesConfig = tryRequire(Framework.Features.Codes.CodesConfig)
 
 local Farm = {
     status = "Idle",
@@ -1821,11 +1821,7 @@ local function redeemCodes(data)
     if Settings["Auto Redeem Codes"] ~= true then
         return false
     end
-    if type(MonetizationConfig) ~= "table" then
-        return false
-    end
-    local codes = MonetizationConfig.Codes
-    if type(codes) ~= "table" then
+    if type(CodesConfig) ~= "table" then
         return false
     end
     local redeemed = {}
@@ -1836,7 +1832,7 @@ local function redeemCodes(data)
         return false
     end
     local did = false
-    for code in codes do
+    for code in CodesConfig do
         if type(code) == "string" and redeemed[code] ~= true then
             local key = "code:" .. code
             if ready(key, 8) then
