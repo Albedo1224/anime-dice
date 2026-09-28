@@ -133,7 +133,6 @@ local defaultSettings = {
     ["Auto Dice Shop"] = true,
     ["Auto Pick Tower"] = true,
     ["Auto Next Tower"] = true,
-    ["Auto Infinity"] = true,
     ["Auto Rejoin"] = true,
     ["Auto Execute On Rejoin"] = true,
     ["Auto Buy Lucky Spin"] = true,
@@ -173,7 +172,7 @@ else
     fillMissing(Settings, defaultSettings)
 end
 Settings["Black Screen"] = true
-Settings["Display Tower"] = false
+Settings["Auto Infinity"] = nil
 Settings["Auto Jackpot Spin"] = nil
 Settings["Auto Use Lucky Spin"] = false
 getgenv().Settings = Settings
@@ -331,7 +330,6 @@ local Net = {
     BuyQuest = Network.QuestService.RE.Buy,
     UseBoost = Network.BoostService.RE.Use,
     RedeemCode = Network.CodesService.RE.RedeemCode,
-    RollDice = Network.RollService.RF.RollDice,
 }
 
 local function tryRequire(inst)
@@ -461,14 +459,7 @@ local function currentFloorLine()
     if type(towerName) ~= "string" or towerName == "" then
         towerName = Settings["Tower"] or "Tower"
     end
-    local line = "Current Floor " .. tostring(Farm.floor or 0) .. " | " .. tostring(towerName)
-    if Farm.questHold then
-        line = line .. " | Quests first"
-        if type(Farm.questNote) == "string" and Farm.questNote ~= "" then
-            line = line .. " " .. Farm.questNote
-        end
-    end
-    return line
+    return "Current Floor " .. tostring(Farm.floor or 0) .. " | " .. tostring(towerName)
 end
 
 local function setStatus(text)
@@ -584,6 +575,41 @@ if RollController and type(origPlayCutscene) == "function" then
 end
 
 do
+    local cutscene = tryRequire(Framework.Features.Rolling.RollCutscene)
+    if type(cutscene) == "function" and type(hookfunction) == "function" and getgenv().AnimeDiceRollCutsceneHooked ~= true then
+        local rawCutscene
+        local function skipSummonCutscene(gradient, chance, model)
+            local skip = getgenv().AnimeDiceSkipSummon
+            if type(skip) == "function" and skip() then
+                if typeof(model) == "Instance" then
+                    pcall(function()
+                        model:Destroy()
+                    end)
+                end
+                return
+            end
+            return rawCutscene(gradient, chance, model)
+        end
+        local replacement = skipSummonCutscene
+        if type(newcclosure) == "function" then
+            local okWrap, wrapped = pcall(newcclosure, skipSummonCutscene)
+            if okWrap and type(wrapped) == "function" then
+                replacement = wrapped
+            end
+        end
+        local okHook, original = pcall(hookfunction, cutscene, replacement)
+        if okHook and type(original) == "function" then
+            rawCutscene = original
+            getgenv().AnimeDiceOrigRollCutscene = original
+            getgenv().AnimeDiceRollCutsceneHooked = true
+        end
+    end
+    getgenv().AnimeDiceSkipSummon = function()
+        return runtime == getgenv().AnimeDiceRuntime and Settings["Skip Animation"] == true
+    end
+end
+
+do
     local origShower = SpinController and SpinController.PlayShower
     if type(getgenv().AnimeDiceOrigPlayShower) == "function" then
         origShower = getgenv().AnimeDiceOrigPlayShower
@@ -670,13 +696,8 @@ local function setRollWait(skipOn)
     end
     local playSeq = Farm.playSeqFn
     if type(playSeq) == "function" and type(debug.setconstant) == "function" then
-        if skipOn then
-            pcall(debug.setconstant, playSeq, 14, 0)
-            pcall(debug.setconstant, playSeq, 25, 0)
-        else
-            pcall(debug.setconstant, playSeq, 14, 0.08)
-            pcall(debug.setconstant, playSeq, 25, 0.5)
-        end
+        pcall(debug.setconstant, playSeq, 14, 0.08)
+        pcall(debug.setconstant, playSeq, 25, 0.5)
     end
 end
 
@@ -729,44 +750,25 @@ local function towerFolder()
     return root and root:FindFirstChild("Tower")
 end
 
-local function applyTowerHidden()
-    local tower = towerFolder()
-    local screen = tower and tower:FindFirstChild("Screen")
-    if screen and screen:IsA("GuiObject") and not Farm.combatWatch then
-        local oldWatch = getgenv().AnimeDiceCombatWatch
-        if oldWatch then
-            pcall(function()
-                oldWatch:Disconnect()
-            end)
-        end
-        Farm.combatWatch = screen:GetPropertyChangedSignal("Visible"):Connect(function()
-            if runtime ~= getgenv().AnimeDiceRuntime or not screen.Visible then
-                return
-            end
-            local hideNow = findNamedFn(
-                "ReplicatedStorage.Framework.Features.Towers.TowerController",
-                "setTowerHidden"
-            )
-            if type(hideNow) == "function" then
-                pcall(hideNow, true)
-            end
-        end)
-        getgenv().AnimeDiceCombatWatch = Farm.combatWatch
-    end
-    local hideFn = findNamedFn(
-        "ReplicatedStorage.Framework.Features.Towers.TowerController",
-        "setTowerHidden"
-    )
-    if type(hideFn) ~= "function" then
+local function restoreGameTower()
+    local gui = plr:FindFirstChild("PlayerGui")
+    if not gui then
         return
     end
-    if screen and screen:IsA("GuiObject") and screen.Visible then
-        pcall(hideFn, true)
+    local root = gui:FindFirstChild("Root")
+    local holder = gui:FindFirstChild("AnimeDiceTower")
+    local tower = holder and holder:FindFirstChild("Tower")
+    if tower and root then
+        tower.Parent = root
+    end
+    if holder and not holder:FindFirstChild("Tower") then
+        holder:Destroy()
     end
 end
 
 getgenv().AnimeDiceRestore = function()
     getgenv().AnimeDiceSkipRollDur = false
+    getgenv().AnimeDiceSkipSummon = nil
     if RollController and type(origPlayCutscene) == "function" then
         pcall(function()
             RollController.PlayCutscene = origPlayCutscene
@@ -876,18 +878,6 @@ local function syncAutoRoll()
     return false, "sent"
 end
 
-local function doRoll(data)
-    if Settings["Auto Roll"] ~= true or type(data) ~= "table" then
-        return false
-    end
-    local money = tonumber(data.Money) or 0
-    if money <= 0 then
-        return false
-    end
-    invokeRemote(Net.RollDice)
-    return true
-end
-
 local function questScore(tbl)
     local progress = rawget(tbl, "progress")
     if type(progress) ~= "table" then
@@ -907,7 +897,7 @@ local function freshQuestTable(expiresAt)
     end
     local now = tick()
     local cache = Farm.questScan
-    if type(cache) ~= "table" or now - (cache.at or 0) > 1 then
+    if type(cache) ~= "table" or now - (cache.at or 0) > 8 then
         cache = { at = now, byExp = {} }
         local ok, list = pcall(filtergc, "table", {
             Keys = { "expiresAt", "progress", "claimed" },
@@ -1281,7 +1271,7 @@ local function towerNames()
         if type(cfg) == "table" then
             order = tonumber(cfg.order) or 999
         end
-        if order < 90 then
+        if order < 90 and name ~= "Infinity Tower" then
             rows[#rows + 1] = { name = name, order = order }
         end
     end
@@ -1302,54 +1292,47 @@ local function lowestTower()
     return names[1]
 end
 
-local function questsFinished(data)
-    if type(QuestConfig) ~= "table" or type(QuestConfig.Periods) ~= "table" then
-        return false
+local function towerConfig(name)
+    if type(name) ~= "string" or type(TowerCatalog) ~= "table" or type(TowerCatalog.GetAll) ~= "function" then
+        return nil
     end
-    local periods = QuestConfig.Periods
-    local serverNow = Workspace:GetServerTimeNow()
-    local names = { "Daily", "Weekly" }
-    for _, periodName in names do
-        local period = periods[periodName]
-        local live = questLive(periodName, data)
-        if type(period) ~= "table" or type(period.quests) ~= "table" or type(live) ~= "table" then
-            return false
-        end
-        local expiresAt = tonumber(live.expiresAt)
-        if not expiresAt or expiresAt <= serverNow then
-            return false
-        end
-        local progress = live.progress
-        local already = live.claimed
-        for _, quest in period.quests do
-            local id = quest and quest.id
-            local target = tonumber(quest and quest.target) or 0
-            if id == "Towers" then
-                local have = 0
-                if type(progress) == "table" then
-                    have = tonumber(progress[id]) or 0
-                end
-                local isClaimed = type(already) == "table" and already[id] == true
-                if have < target and not isClaimed then
-                    return false, periodName .. " " .. id .. " " .. tostring(math.floor(have)) .. "/" .. tostring(math.floor(target))
-                end
-            end
-        end
+    local all = TowerCatalog.GetAll()
+    if type(all) ~= "table" then
+        return nil
     end
-    return true, ""
+    return all[name]
 end
 
-local function wantedTower(data)
-    if Settings["Auto Infinity"] == true then
-        local done, note = questsFinished(data)
-        Farm.questNote = note or ""
-        if done then
-            return "Infinity Tower"
+local function towerIndex(name)
+    local names = towerNames()
+    for index, towerName in names do
+        if towerName == name then
+            return index, names
         end
-    else
-        Farm.questNote = ""
     end
-    return lowestTower()
+    return 0, names
+end
+
+local function nextTowerName(name)
+    local index, names = towerIndex(name)
+    if index <= 0 then
+        return names[1]
+    end
+    local nextIndex = index + 1
+    if nextIndex > #names then
+        nextIndex = 1
+    end
+    return names[nextIndex]
+end
+
+local function wantedTower()
+    local name = Settings["Tower"]
+    local index, names = towerIndex(name)
+    if index <= 0 then
+        name = names[1]
+        Settings["Tower"] = name
+    end
+    return name
 end
 
 local function runningTowerName()
@@ -1363,6 +1346,26 @@ local function runningTowerName()
             end
             if type(value) == "string" and value ~= "" then
                 return value
+            end
+            if type(value) == "function" then
+                local j = 1
+                while j <= 16 do
+                    local okInner, inner = pcall(debug.getupvalue, value, j)
+                    if not okInner then
+                        break
+                    end
+                    if type(inner) == "string" and inner ~= "" then
+                        local known = false
+                        if type(TowerCatalog) == "table" and type(TowerCatalog.GetAll) == "function" then
+                            local all = TowerCatalog.GetAll()
+                            known = type(all) == "table" and type(all[inner]) == "table"
+                        end
+                        if known then
+                            return inner
+                        end
+                    end
+                    j = j + 1
+                end
             end
             i = i + 1
         end
@@ -1513,27 +1516,58 @@ local function trackTowerFloor()
     end
 end
 
+local function finishTowerRun()
+    local cfg = towerConfig(Farm.towerRunName)
+    local maxFloors = 0
+    if type(cfg) == "table" then
+        maxFloors = tonumber(cfg.maxFloors) or 0
+    end
+    local reached = Farm.towerRunMax or 0
+    local low = Farm.towerRunLow
+    local won = maxFloors > 0 and reached >= maxFloors and low ~= nil and low < maxFloors
+    if won then
+        local nxt = nextTowerName(Farm.towerRunName)
+        Settings["Tower"] = nxt
+        local index = towerIndex(Farm.towerRunName)
+        if index > 0 then
+            Farm.towerCleared = index
+            Settings["Tower Cleared"] = index
+        end
+        farmLog("towerWin", "Cleared " .. tostring(Farm.towerRunName) .. " next " .. tostring(nxt))
+    end
+    Farm.towerArmed = false
+    Farm.towerWasIn = false
+    Farm.towerRunMax = 0
+    Farm.towerRunLow = nil
+end
+
 local function settleTowerRun()
     if inTower() then
         if Farm.towerArmed then
             Farm.towerWasIn = true
+            local floor = readTowerFloor()
+            if floor > 0 then
+                if Farm.towerRunLow == nil or floor < Farm.towerRunLow then
+                    Farm.towerRunLow = floor
+                end
+                if floor > (Farm.towerRunMax or 0) then
+                    Farm.towerRunMax = floor
+                end
+            end
         end
         return
     end
     if Farm.towerArmed and Farm.towerWasIn then
-        Farm.towerArmed = false
-        Farm.towerWasIn = false
+        finishTowerRun()
     end
 end
 
 local function startNextTower(data)
     settleTowerRun()
     if Settings["Auto Next Tower"] ~= true then
-        Farm.questHold = false
         return false
     end
-    local name = wantedTower(data)
-    Farm.questHold = Settings["Auto Infinity"] == true and name ~= "Infinity Tower"
+    local name = wantedTower()
     if inTower() then
         local running = runningTowerName()
         if running ~= "" and running ~= name then
@@ -1555,6 +1589,9 @@ local function startNextTower(data)
         end
         if Farm.towerStuckCancel ~= true then
             invokeRemote(Net.CancelTower)
+            if not inTower() then
+                invokeRemote(Net.CompleteTowerFloor)
+            end
             Farm.towerStuckCancel = true
             Farm.towerArmAt = tick()
             farmLog("tower", "Clear stuck tower")
@@ -1574,14 +1611,14 @@ local function startNextTower(data)
         started = ok and result == true
     end
     if not started then
-        local tries = Farm.towerStuckTries or 0
-        if tries == 0 then
+        if Farm.towerStuckTries ~= 1 and not inTower() then
             invokeRemote(Net.CancelTower)
-            farmLog("tower", "Clear stuck tower")
-        elseif tries == 1 then
             invokeRemote(Net.CompleteTowerFloor)
+            farmLog("tower", "Clear stuck tower")
+            Farm.towerStuckTries = 1
+        else
+            Farm.towerStuckTries = 0
         end
-        Farm.towerStuckTries = (tries + 1) % 3
         return false
     end
     Farm.towerStuckTries = 0
@@ -2042,44 +2079,6 @@ pcall(queueAutoExec)
 getgenv().AnimeDiceFarm = Farm
 
 task.spawn(function()
-    while runtime == getgenv().AnimeDiceRuntime do
-        local okRoll, rollErr = xpcall(function()
-            if Settings["Auto Roll"] ~= true then
-                task.wait(0.2)
-                return
-            end
-            local data = getReplica()
-            if type(data) ~= "table" or (tonumber(data.Money) or 0) <= 0 then
-                task.wait(0.2)
-                return
-            end
-            local before = tonumber(data.Rolls) or 0
-            doRoll(data)
-            local timeout = 2.4
-            if Settings["Skip Animation"] ~= true then
-                timeout = 5
-            end
-            local deadline = tick() + timeout
-            while runtime == getgenv().AnimeDiceRuntime and tick() < deadline do
-                data = getReplica()
-                local nowRolls = 0
-                if type(data) == "table" then
-                    nowRolls = tonumber(data.Rolls) or 0
-                end
-                if nowRolls > before then
-                    return
-                end
-                task.wait(0.2)
-            end
-        end, debug.traceback)
-        if not okRoll then
-            farmLog("roll", tostring(rollErr))
-            task.wait(0.4)
-        end
-    end
-end)
-
-task.spawn(function()
     local gui = plr:FindFirstChild("PlayerGui") or plr:WaitForChild("PlayerGui", 10)
     if gui then
         gui.ChildAdded:Connect(function(child)
@@ -2117,7 +2116,6 @@ task.spawn(function()
         local didSell = sellSpareUnits(data)
         local didUpgrade = buyUpgrades(data)
         local didDice = diceShop(data)
-        applyTowerHidden()
         trackTowerFloor()
         local didNextTower = startNextTower(data)
         local didCode = redeemCodes(data)
@@ -2272,4 +2270,11 @@ if rbxGui then
         etc:Destroy()
     end
 end
-pcall(applyTowerHidden)
+local oldCombatWatch = getgenv().AnimeDiceCombatWatch
+if oldCombatWatch then
+    pcall(function()
+        oldCombatWatch:Disconnect()
+    end)
+    getgenv().AnimeDiceCombatWatch = nil
+end
+pcall(restoreGameTower)
