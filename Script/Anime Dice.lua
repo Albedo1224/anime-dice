@@ -1646,7 +1646,9 @@ local function ensureBlackGui()
     gui = Instance.new("ScreenGui")
     gui.Name = "AnimeDiceBlack"
     gui.ResetOnSpawn = false
-    gui.IgnoreGuiInset = false
+    gui.IgnoreGuiInset = true
+    gui.ScreenInsets = Enum.ScreenInsets.None
+    gui.ClipToDeviceSafeArea = false
     gui.DisplayOrder = 500
     gui.Parent = playerGui
     local frame = Instance.new("Frame")
