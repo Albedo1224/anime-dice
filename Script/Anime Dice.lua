@@ -136,7 +136,7 @@ local defaultSettings = {
     ["Auto Infinity"] = true,
     ["Auto Rejoin"] = true,
     ["Auto Execute On Rejoin"] = true,
-    ["Auto Jackpot Spin"] = false,
+    ["Auto Buy Lucky Spin"] = true,
     ["Auto Use Lucky Spin"] = false,
     ["Auto Use Boost"] = true,
     ["Auto Redeem Codes"] = true,
@@ -174,7 +174,7 @@ else
 end
 Settings["Black Screen"] = true
 Settings["Display Tower"] = false
-Settings["Auto Jackpot Spin"] = false
+Settings["Auto Jackpot Spin"] = nil
 Settings["Auto Use Lucky Spin"] = false
 getgenv().Settings = Settings
 
@@ -328,6 +328,7 @@ local Net = {
     EquipBestTower = Network.Towers.RE.EquipBestTowerTeam,
     CancelTower = Network.Towers.RF.CancelTower,
     CompleteTowerFloor = Network.Towers.RF.CompleteTowerFloor,
+    BuyQuest = Network.QuestService.RE.Buy,
     UseBoost = Network.BoostService.RE.Use,
     RedeemCode = Network.CodesService.RE.RedeemCode,
     RollDice = Network.RollService.RF.RollDice,
@@ -1744,6 +1745,41 @@ end
 
 Farm.refreshBlack = updateBlackScreen
 
+local function shopCost(itemName)
+    if type(QuestConfig) ~= "table" then
+        return nil
+    end
+    local shop = QuestConfig.Shop
+    if type(shop) ~= "table" then
+        return nil
+    end
+    for _, item in shop do
+        if type(item) == "table" and item.name == itemName and item.gamepass ~= true then
+            return tonumber(item.tickets) or 0
+        end
+    end
+    return nil
+end
+
+local function buyLuckySpin(data)
+    if Settings["Auto Buy Lucky Spin"] ~= true or type(data) ~= "table" then
+        return false
+    end
+    local cost = shopCost("Lucky Spin")
+    if not cost or cost <= 0 then
+        return false
+    end
+    if itemAmount(data, "Tickets") < cost then
+        return false
+    end
+    if not ready("luckyBuy", 1.5) then
+        return false
+    end
+    fireRemote(Net.BuyQuest, "Lucky Spin")
+    farmLog("luckyBuy", "Buy Lucky Spin")
+    return true
+end
+
 local function useBoosts(data)
     if Settings["Auto Use Boost"] ~= true or type(data) ~= "table" then
         return false
@@ -2083,6 +2119,7 @@ task.spawn(function()
         trackTowerFloor()
         local didNextTower = startNextTower(data)
         local didCode = redeemCodes(data)
+        local didLuckyBuy = buyLuckySpin(data)
         local didBoost = useBoosts(data)
         local didRebirth = doRebirth(data)
 
@@ -2098,6 +2135,8 @@ task.spawn(function()
             setStatus("Buying upgrade")
         elseif didDice then
             setStatus("Dice shop")
+        elseif didLuckyBuy then
+            setStatus("Buying Lucky Spin")
         elseif didBoost then
             setStatus("Using boost")
         elseif didCode then
