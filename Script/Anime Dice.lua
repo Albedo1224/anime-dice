@@ -124,7 +124,6 @@ local defaultSettings = {
     ["Auto Roll"] = true,
     ["Skip Animation"] = true,
     ["Hide Black Screen"] = true,
-    ["Display Tower"] = true,
     ["Auto Claim Quests"] = true,
     ["Auto Equip Best"] = true,
     ["Auto Claim Cash"] = true,
@@ -137,13 +136,14 @@ local defaultSettings = {
     ["Auto Infinity"] = true,
     ["Auto Rejoin"] = true,
     ["Auto Execute On Rejoin"] = true,
-    ["Auto Jackpot Spin"] = true,
-    ["Auto Use Lucky Spin"] = true,
+    ["Auto Jackpot Spin"] = false,
+    ["Auto Use Lucky Spin"] = false,
     ["Auto Use Boost"] = true,
     ["Auto Redeem Codes"] = true,
     ["FPS Boost"] = true,
     ["Anti-AFK"] = true,
     ["Black Screen"] = true,
+    ["Display Tower"] = false,
     ["Tower"] = "Dragon Tower",
     ["Tower Cleared"] = 0,
 }
@@ -173,6 +173,9 @@ else
     fillMissing(Settings, defaultSettings)
 end
 Settings["Black Screen"] = true
+Settings["Display Tower"] = false
+Settings["Auto Jackpot Spin"] = false
+Settings["Auto Use Lucky Spin"] = false
 getgenv().Settings = Settings
 
 do
@@ -325,8 +328,6 @@ local Net = {
     EquipBestTower = Network.Towers.RE.EquipBestTowerTeam,
     CancelTower = Network.Towers.RF.CancelTower,
     CompleteTowerFloor = Network.Towers.RF.CompleteTowerFloor,
-    BuyQuest = Network.QuestService.RE.Buy,
-    UseSpin = Network.SpinService.RE.Use,
     UseBoost = Network.BoostService.RE.Use,
     RedeemCode = Network.CodesService.RE.RedeemCode,
     RollDice = Network.RollService.RF.RollDice,
@@ -728,6 +729,29 @@ local function towerFolder()
 end
 
 local function applyTowerHidden()
+    local tower = towerFolder()
+    local screen = tower and tower:FindFirstChild("Screen")
+    if screen and screen:IsA("GuiObject") and not Farm.combatWatch then
+        local oldWatch = getgenv().AnimeDiceCombatWatch
+        if oldWatch then
+            pcall(function()
+                oldWatch:Disconnect()
+            end)
+        end
+        Farm.combatWatch = screen:GetPropertyChangedSignal("Visible"):Connect(function()
+            if runtime ~= getgenv().AnimeDiceRuntime or not screen.Visible then
+                return
+            end
+            local hideNow = findNamedFn(
+                "ReplicatedStorage.Framework.Features.Towers.TowerController",
+                "setTowerHidden"
+            )
+            if type(hideNow) == "function" then
+                pcall(hideNow, true)
+            end
+        end)
+        getgenv().AnimeDiceCombatWatch = Farm.combatWatch
+    end
     local hideFn = findNamedFn(
         "ReplicatedStorage.Framework.Features.Towers.TowerController",
         "setTowerHidden"
@@ -735,19 +759,9 @@ local function applyTowerHidden()
     if type(hideFn) ~= "function" then
         return
     end
-    local hide = Settings["Display Tower"] ~= true
-    local tower = towerFolder()
-    local screen = tower and tower:FindFirstChild("Screen")
-    local hidden = tower and tower:FindFirstChild("Hidden")
-    local screenShown = screen and screen:IsA("GuiObject") and screen.Visible
-    local chipShown = hidden and hidden:IsA("GuiObject") and hidden.Visible
-    if hide and chipShown and not screenShown then
-        return
+    if screen and screen:IsA("GuiObject") and screen.Visible then
+        pcall(hideFn, true)
     end
-    if not hide and screenShown then
-        return
-    end
-    pcall(hideFn, hide)
 end
 
 getgenv().AnimeDiceRestore = function()
@@ -1598,7 +1612,7 @@ local BlackRows = {
     { name = "Gems", image = "rbxassetid://99406696477560", color = Color3.fromRGB(80, 230, 255) },
     { name = "Trait Reroll", image = "rbxassetid://133531024200552", color = Color3.fromRGB(186, 120, 255) },
     { name = "Tickets", image = "rbxassetid://84743623119270", color = Color3.fromRGB(255, 176, 60) },
-    { name = "Jackpot Spin", image = "rbxassetid://76821109669261", color = Color3.fromRGB(255, 86, 168) },
+    { name = "Lucky Spin", image = "rbxassetid://94135894449250", color = Color3.fromRGB(255, 86, 168) },
 }
 
 local function blackAmounts(data)
@@ -1611,7 +1625,7 @@ local function blackAmounts(data)
         Gems = itemAmount(data, "Gems"),
         ["Trait Reroll"] = itemAmount(data, "Trait Reroll"),
         Tickets = itemAmount(data, "Tickets"),
-        ["Jackpot Spin"] = itemAmount(data, "Jackpot Spin"),
+        ["Lucky Spin"] = itemAmount(data, "Lucky Spin"),
     }
 end
 
@@ -1729,61 +1743,6 @@ local function updateBlackScreen(data)
 end
 
 Farm.refreshBlack = updateBlackScreen
-
-local function shopCost(itemName)
-    if type(QuestConfig) ~= "table" then
-        return nil
-    end
-    local shop = QuestConfig.Shop
-    if type(shop) ~= "table" then
-        return nil
-    end
-    for _, item in shop do
-        if type(item) == "table" and item.name == itemName and item.gamepass ~= true then
-            return tonumber(item.tickets) or 0
-        end
-    end
-    return nil
-end
-
-local function buyJackpot(data)
-    if Settings["Auto Jackpot Spin"] ~= true or type(data) ~= "table" then
-        return false
-    end
-    local cost = shopCost("Jackpot Spin")
-    if not cost or cost <= 0 then
-        return false
-    end
-    local tickets = itemAmount(data, "Tickets")
-    if tickets < cost then
-        return false
-    end
-    if not ready("jackpot", 1.5) then
-        return false
-    end
-    fireRemote(Net.BuyQuest, "Jackpot Spin")
-    farmLog("jackpot", "Buy Jackpot Spin")
-    return true
-end
-
-local function useSpinItem(data, itemName, key)
-    if type(data) ~= "table" or itemAmount(data, itemName) < 1 then
-        return false
-    end
-    if not ready(key, 1.5) then
-        return false
-    end
-    fireRemote(Net.UseSpin, itemName)
-    farmLog(key, "Use " .. itemName)
-    return true
-end
-
-local function useLuckySpin(data)
-    if Settings["Auto Use Lucky Spin"] ~= true then
-        return false
-    end
-    return useSpinItem(data, "Lucky Spin", "luckySpin")
-end
 
 local function useBoosts(data)
     if Settings["Auto Use Boost"] ~= true or type(data) ~= "table" then
@@ -2124,8 +2083,6 @@ task.spawn(function()
         trackTowerFloor()
         local didNextTower = startNextTower(data)
         local didCode = redeemCodes(data)
-        local didSpin = useLuckySpin(data)
-        local didJackpot = buyJackpot(data)
         local didBoost = useBoosts(data)
         local didRebirth = doRebirth(data)
 
@@ -2141,10 +2098,6 @@ task.spawn(function()
             setStatus("Buying upgrade")
         elseif didDice then
             setStatus("Dice shop")
-        elseif didSpin then
-            setStatus("Using Lucky Spin")
-        elseif didJackpot then
-            setStatus("Buying Jackpot Spin")
         elseif didBoost then
             setStatus("Using boost")
         elseif didCode then
