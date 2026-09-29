@@ -1,3 +1,5 @@
+random00 = "how to hide a dead body"
+
 repeat task.wait()
 until game:IsLoaded() and game:FindFirstChild("CoreGui") and pcall(function() return game.CoreGui end)
 
@@ -471,6 +473,7 @@ local GearCatalog = tryRequire(Framework.Features.Inventory.Kinds.Gear.GearConfi
 local CodesConfig = tryRequire(Framework.Features.Codes.CodesConfig)
 local DailyRewardConfig = tryRequire(Framework.Features.Rewards.DailyRewardConfig)
 local MenuController = tryRequire(Framework.Features.UI.MenuController)
+local EntryDropController = tryRequire(Framework.Features.Notifications.EntryDropController)
 
 local Farm = {
     status = "Idle",
@@ -514,6 +517,23 @@ local Farm = {
     towerRetreat = false,
     towerRetreatPower = 0,
 }
+
+local origOpenMenu = MenuController and MenuController.OpenMenu
+if type(getgenv().AnimeDiceOrigOpenMenu) == "function" then
+    origOpenMenu = getgenv().AnimeDiceOrigOpenMenu
+elseif type(origOpenMenu) == "function" then
+    getgenv().AnimeDiceOrigOpenMenu = origOpenMenu
+end
+
+local origEntryDropPlay = EntryDropController and EntryDropController.Play
+if type(getgenv().AnimeDiceOrigEntryDropPlay) == "function" then
+    origEntryDropPlay = getgenv().AnimeDiceOrigEntryDropPlay
+elseif type(origEntryDropPlay) == "function" then
+    getgenv().AnimeDiceOrigEntryDropPlay = origEntryDropPlay
+end
+
+local openMenuWrapper
+local entryDropWrapper
 
 local function farmLog(key, text)
     local now = tick()
@@ -904,8 +924,54 @@ getgenv().AnimeDiceRestore = function()
             BuffController.GetBuff = getgenv().AnimeDiceOrigGetBuff
         end)
     end
+    if MenuController and type(origOpenMenu) == "function"
+    and MenuController.OpenMenu == openMenuWrapper then
+        pcall(function()
+            MenuController.OpenMenu = origOpenMenu
+        end)
+    end
+    if EntryDropController and type(origEntryDropPlay) == "function"
+    and EntryDropController.Play == entryDropWrapper then
+        pcall(function()
+            EntryDropController.Play = origEntryDropPlay
+        end)
+    end
     setRollWait(false)
     hideRollingGui(false)
+end
+
+if MenuController and type(origOpenMenu) == "function" then
+    openMenuWrapper = function(menu, ...)
+        if runtime == getgenv().AnimeDiceRuntime
+        and typeof(menu) == "Instance" and menu.Name == "TowerRewards" then
+            task.defer(function()
+                if runtime == getgenv().AnimeDiceRuntime
+                and MenuController.ActiveMenu() == menu then
+                    MenuController.CloseMenu()
+                end
+            end)
+        end
+        return origOpenMenu(menu, ...)
+    end
+    MenuController.OpenMenu = openMenuWrapper
+end
+
+if EntryDropController and type(origEntryDropPlay) == "function" then
+    entryDropWrapper = function(...)
+        if runtime == getgenv().AnimeDiceRuntime then
+            return
+        end
+        return origEntryDropPlay(...)
+    end
+    EntryDropController.Play = entryDropWrapper
+end
+
+if MenuController and type(MenuController.ActiveMenu) == "function"
+and type(MenuController.CloseMenu) == "function" then
+    local activeMenu = MenuController.ActiveMenu()
+    if activeMenu and activeMenu.Name == "TowerRewards" then
+        MenuController.CloseMenu()
+    end
 end
 
 local function setHiddenRolls(wanted)
