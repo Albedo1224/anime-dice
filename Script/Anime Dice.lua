@@ -150,6 +150,7 @@ local defaultSettings = {
     ["Display Tower"] = false,
     ["Tower"] = "Dragon Tower",
     ["Tower Order"] = "cycle",
+    ["Hunt Gear"] = "",
     ["Tower Cleared"] = 0,
 }
 
@@ -448,6 +449,7 @@ local DataController = tryRequire(Framework.Features.Data.DataController)
 local SpinController = tryRequire(Framework.Features.Inventory.Kinds.Spin.SpinController)
 local BuffController = tryRequire(Framework.Features.Buffs.BuffController)
 local EntryRegistry = tryRequire(Framework.Features.Inventory.EntryRegistry)
+local GearCatalog = tryRequire(Framework.Features.Inventory.Kinds.Gear.GearConfig)
 local CodesConfig = tryRequire(Framework.Features.Codes.CodesConfig)
 
 local Farm = {
@@ -1240,9 +1242,12 @@ local function sellSpareUnits(data)
         return false
     end
     local keep = keptUnitIds(data)
+    local gearEntries = type(GearCatalog) == "table" and GearCatalog.entries or nil
     local toSell = {}
     for uid, entry in data.Inventory do
-        if type(uid) == "string" and keep[uid] ~= true then
+        local entryName = type(entry) == "table" and entry.name or nil
+        local isGear = type(gearEntries) == "table" and (gearEntries[uid] ~= nil or (type(entryName) == "string" and gearEntries[entryName] ~= nil))
+        if type(uid) == "string" and keep[uid] ~= true and not isGear then
             local locked = false
             if type(entry) == "table" then
                 locked = entry.locked == true
@@ -1709,8 +1714,93 @@ local function settleTowerRun()
     end
 end
 
+local function huntGearName()
+    local raw = Settings["Hunt Gear"]
+    if type(raw) ~= "string" then
+        return ""
+    end
+    local clean = trimText(raw)
+    if clean == "" then
+        return ""
+    end
+    if string.sub(string.lower(clean), -5) == " gear" then
+        clean = trimText(string.sub(clean, 1, #clean - 5))
+    end
+    return clean
+end
+
+local function gearOwned(data, name)
+    if type(data) ~= "table" or type(data.Inventory) ~= "table" then
+        return false
+    end
+    local want = string.lower(name)
+    for key, entry in data.Inventory do
+        if type(entry) == "table" and (tonumber(entry.amount) or 0) > 0 then
+            local itemName = type(entry.name) == "string" and entry.name or key
+            if type(itemName) == "string" and string.lower(itemName) == want then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+local function towerForGear(name)
+    if type(Farm.huntTower) == "string" and Farm.huntTower ~= "" then
+        return Farm.huntTower
+    end
+    local all = catalogAll()
+    if type(all) ~= "table" then
+        return nil
+    end
+    local want = string.lower(name)
+    for towerName, cfg in all do
+        if type(cfg) == "table" and type(cfg.drops) == "table" then
+            for _, band in cfg.drops do
+                if type(band) == "table" and type(band.entries) == "table" then
+                    for _, reward in band.entries do
+                        if type(reward) == "table" and type(reward.name) == "string" and string.lower(reward.name) == want then
+                            Farm.huntTower = towerName
+                            return towerName
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function syncHuntGear(data)
+    local name = huntGearName()
+    if name == "" or type(data) ~= "table" then
+        return
+    end
+    if gearOwned(data, name) then
+        if Settings["Tower Order"] ~= "inf" then
+            Settings["Tower Order"] = "inf"
+            Settings["Tower"] = "Infinity Tower"
+            farmLog("gear", "Got " .. name .. ", Infinity Tower")
+        end
+        return
+    end
+    local towerName = towerForGear(name)
+    if not towerName then
+        return
+    end
+    local order = Settings["Tower Order"]
+    local hunting = type(order) == "table" and order[1] == towerName and order[2] == nil and Settings["Tower"] == towerName
+    if hunting then
+        return
+    end
+    Settings["Tower Order"] = { towerName }
+    Settings["Tower"] = towerName
+    farmLog("gear", "Hunt " .. name .. " in " .. towerName)
+end
+
 local function startNextTower(data)
     settleTowerRun()
+    syncHuntGear(data)
     if Settings["Auto Next Tower"] ~= true then
         return false
     end
