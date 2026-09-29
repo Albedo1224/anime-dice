@@ -85,6 +85,11 @@ local function normalizeScalar(value)
         return false
     end
     if type(value) == "string" then
+        local word = string.lower(value)
+        word = string.gsub(word, "%s+", "")
+        if word == "inf" or word == "infinity" or word == "+inf" or word == "+infinity" then
+            return value
+        end
         local numberValue = tonumber(value)
         if numberValue ~= nil then
             return numberValue
@@ -178,6 +183,9 @@ local function trimText(text)
 end
 
 local function isInfinityOrder(value)
+    if type(value) == "number" then
+        return value == math.huge
+    end
     if type(value) ~= "string" then
         return false
     end
