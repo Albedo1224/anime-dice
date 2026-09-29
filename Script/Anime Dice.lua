@@ -149,8 +149,7 @@ local defaultSettings = {
     ["Black Screen"] = true,
     ["Display Tower"] = false,
     ["Tower"] = "Dragon Tower",
-    ["Tower Order"] = "cycle",
-    ["Hunt Gear"] = "",
+    ["Tower Order"] = "InfGear",
     ["Tower Cleared"] = 0,
 }
 
@@ -193,6 +192,15 @@ local function isInfinityOrder(value)
     local text = string.lower(trimText(value))
     text = string.gsub(text, "%s+", "")
     return text == "inf" or text == "infinity" or text == "infinitytower"
+end
+
+local function isInfGearOrder(value)
+    if type(value) ~= "string" then
+        return false
+    end
+    local text = string.lower(trimText(value))
+    text = string.gsub(text, "%s+", "")
+    return text == "infgear"
 end
 
 local function cleanTowerList(value)
@@ -239,6 +247,13 @@ local function applyTowerOrder()
     if isInfinityOrder(order) then
         Settings["Tower Order"] = "inf"
         Settings["Tower"] = "Infinity Tower"
+        return
+    end
+    local huntGear = Settings["Hunt Gear"]
+    local huntSet = type(huntGear) == "string" and trimText(huntGear) ~= ""
+    if isInfGearOrder(order) or huntSet then
+        Settings["Tower Order"] = "InfGear"
+        Settings["Hunt Gear"] = nil
         return
     end
     if type(order) == "string" and string.lower(trimText(order)) == "cycle" then
@@ -420,6 +435,7 @@ local Net = {
     BuyQuest = Network.QuestService.RE.Buy,
     UseBoost = Network.BoostService.RE.Use,
     RedeemCode = Network.CodesService.RE.RedeemCode,
+    EquipGear = Network.GearService.RE.Equip,
 }
 
 local function tryRequire(inst)
@@ -1417,6 +1433,9 @@ local function towerNames()
     if order == "inf" then
         return { "Infinity Tower" }
     end
+    if order == "InfGear" then
+        return { Farm.huntTower or "Cursed Tower" }
+    end
     if type(order) == "table" then
         local all = catalogAll()
         local names = {}
@@ -1714,20 +1733,7 @@ local function settleTowerRun()
     end
 end
 
-local function huntGearName()
-    local raw = Settings["Hunt Gear"]
-    if type(raw) ~= "string" then
-        return ""
-    end
-    local clean = trimText(raw)
-    if clean == "" then
-        return ""
-    end
-    if string.sub(string.lower(clean), -5) == " gear" then
-        clean = trimText(string.sub(clean, 1, #clean - 5))
-    end
-    return clean
-end
+local InfGearName = "Jogu's Robe"
 
 local function gearOwned(data, name)
     if type(data) ~= "table" or type(data.Inventory) ~= "table" then
@@ -1771,36 +1777,57 @@ local function towerForGear(name)
     return nil
 end
 
-local function syncHuntGear(data)
-    local name = huntGearName()
-    if name == "" or type(data) ~= "table" then
-        return
+local function gearEquipped(data, name)
+    if type(data) ~= "table" or type(data.EquippedGear) ~= "table" then
+        return false
     end
-    if gearOwned(data, name) then
-        if Settings["Tower Order"] ~= "inf" then
-            Settings["Tower Order"] = "inf"
-            Settings["Tower"] = "Infinity Tower"
-            farmLog("gear", "Got " .. name .. ", Infinity Tower")
+    local want = string.lower(name)
+    for _, value in data.EquippedGear do
+        if type(value) == "string" and string.lower(value) == want then
+            return true
         end
+    end
+    return false
+end
+
+local function gearSlot(name)
+    local entries = type(GearCatalog) == "table" and GearCatalog.entries or nil
+    local cfg = type(entries) == "table" and entries[name] or nil
+    if type(cfg) == "table" and type(cfg.slot) == "string" and cfg.slot ~= "" then
+        return cfg.slot
+    end
+    return "Back"
+end
+
+local function syncInfGear(data)
+    if Settings["Tower Order"] ~= "InfGear" or type(data) ~= "table" then
         return
     end
-    local towerName = towerForGear(name)
-    if not towerName then
+    local name = InfGearName
+    if gearOwned(data, name) then
+        if not gearEquipped(data, name) then
+            if ready("equipGear", 1) then
+                fireRemote(Net.EquipGear, gearSlot(name), name)
+                farmLog("gear", "Equip " .. name)
+            end
+            return
+        end
+        Settings["Tower Order"] = "inf"
+        Settings["Tower"] = "Infinity Tower"
+        farmLog("gear", "Equipped " .. name .. ", Infinity Tower")
         return
     end
-    local order = Settings["Tower Order"]
-    local hunting = type(order) == "table" and order[1] == towerName and order[2] == nil and Settings["Tower"] == towerName
-    if hunting then
-        return
+    local towerName = towerForGear(name) or "Cursed Tower"
+    Farm.huntTower = towerName
+    if Settings["Tower"] ~= towerName then
+        Settings["Tower"] = towerName
+        farmLog("gear", "Hunt " .. name .. " in " .. towerName)
     end
-    Settings["Tower Order"] = { towerName }
-    Settings["Tower"] = towerName
-    farmLog("gear", "Hunt " .. name .. " in " .. towerName)
 end
 
 local function startNextTower(data)
     settleTowerRun()
-    syncHuntGear(data)
+    syncInfGear(data)
     if Settings["Auto Next Tower"] ~= true then
         return false
     end
