@@ -144,6 +144,7 @@ local defaultSettings = {
     ["Black Screen"] = true,
     ["Display Tower"] = false,
     ["Tower"] = "Dragon Tower",
+    ["Tower Order"] = "cycle",
     ["Tower Cleared"] = 0,
 }
 
@@ -171,6 +172,86 @@ else
     end
     fillMissing(Settings, defaultSettings)
 end
+
+local function trimText(text)
+    return string.match(text, "^%s*(.-)%s*$") or text
+end
+
+local function isInfinityOrder(value)
+    if type(value) ~= "string" then
+        return false
+    end
+    local text = string.lower(trimText(value))
+    text = string.gsub(text, "%s+", "")
+    return text == "inf" or text == "infinity" or text == "infinitytower"
+end
+
+local function cleanTowerList(value)
+    local names = {}
+    local seen = {}
+    local function add(raw)
+        if type(raw) ~= "string" then
+            return
+        end
+        local clean = trimText(raw)
+        if clean == "" or seen[string.lower(clean)] then
+            return
+        end
+        seen[string.lower(clean)] = true
+        names[#names + 1] = clean
+    end
+    if type(value) == "string" then
+        if string.find(value, ",", 1, true) then
+            for part in string.gmatch(value, "[^,]+") do
+                add(part)
+            end
+        else
+            add(value)
+        end
+    elseif type(value) == "table" then
+        for _, raw in value do
+            add(raw)
+        end
+    end
+    return names, seen
+end
+
+local function orderIsDefault(order)
+    return order == nil or (type(order) == "string" and string.lower(trimText(order)) == "cycle")
+end
+
+local function applyTowerOrder()
+    local order = Settings["Tower Order"]
+    local tower = Settings["Tower"]
+    if orderIsDefault(order) and (type(tower) == "table" or isInfinityOrder(tower)) then
+        order = tower
+        tower = nil
+    end
+    if isInfinityOrder(order) then
+        Settings["Tower Order"] = "inf"
+        Settings["Tower"] = "Infinity Tower"
+        return
+    end
+    if type(order) == "string" and string.lower(trimText(order)) == "cycle" then
+        order = nil
+    end
+    local names, seen = cleanTowerList(order)
+    if #names > 0 then
+        Settings["Tower Order"] = names
+        if type(tower) == "string" and seen[string.lower(trimText(tower))] then
+            Settings["Tower"] = trimText(tower)
+        else
+            Settings["Tower"] = names[1]
+        end
+        return
+    end
+    Settings["Tower Order"] = "cycle"
+    if type(Settings["Tower"]) ~= "string" or Settings["Tower"] == "" or isInfinityOrder(Settings["Tower"]) then
+        Settings["Tower"] = "Dragon Tower"
+    end
+end
+
+applyTowerOrder()
 Settings["Black Screen"] = true
 Settings["Auto Infinity"] = nil
 Settings["Auto Jackpot Spin"] = nil
@@ -1256,12 +1337,43 @@ local function diceShop(data)
     return false
 end
 
-local function towerNames()
-    local names = {}
+local function catalogAll()
     if type(TowerCatalog) ~= "table" or type(TowerCatalog.GetAll) ~= "function" then
-        return { "Dragon Tower" }
+        return nil
     end
     local all = TowerCatalog.GetAll()
+    if type(all) ~= "table" then
+        return nil
+    end
+    return all
+end
+
+local function matchTowerName(raw, all)
+    if type(raw) ~= "string" then
+        return nil
+    end
+    local clean = trimText(raw)
+    if clean == "" then
+        return nil
+    end
+    if type(all) ~= "table" then
+        return clean
+    end
+    if type(all[clean]) == "table" then
+        return clean
+    end
+    local lower = string.lower(clean)
+    for name, cfg in all do
+        if type(name) == "string" and string.lower(name) == lower and type(cfg) == "table" then
+            return name
+        end
+    end
+    return nil
+end
+
+local function cycleNames()
+    local names = {}
+    local all = catalogAll()
     if type(all) ~= "table" then
         return { "Dragon Tower" }
     end
@@ -1285,6 +1397,33 @@ local function towerNames()
         names[1] = "Dragon Tower"
     end
     return names
+end
+
+local function towerNames()
+    local order = Settings["Tower Order"]
+    if order == "inf" then
+        return { "Infinity Tower" }
+    end
+    if type(order) == "table" then
+        local all = catalogAll()
+        local names = {}
+        local seen = {}
+        for _, raw in order do
+            local name = matchTowerName(raw, all)
+            if name and not seen[name] then
+                seen[name] = true
+                names[#names + 1] = name
+            end
+        end
+        if #names > 0 then
+            local current = matchTowerName(Settings["Tower"], all)
+            if current and seen[current] then
+                Settings["Tower"] = current
+            end
+            return names
+        end
+    end
+    return cycleNames()
 end
 
 local function lowestTower()
