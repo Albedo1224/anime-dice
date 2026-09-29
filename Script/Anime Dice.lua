@@ -2365,6 +2365,31 @@ getgenv().AnimeDiceAntiAfk = plr.Idled:Connect(function()
     end)
 end)
 
+if not getgenv().AnimeDiceNoteGuard then
+    local okMt, mt = pcall(getrawmetatable, game)
+    if okMt and type(mt) == "table" and type(newcclosure) == "function" and type(setreadonly) == "function" then
+        local oldNew = mt.__newindex
+        local function assign(self, key, value)
+            return oldNew(self, key, value)
+        end
+        setreadonly(mt, false)
+        mt.__newindex = newcclosure(function(self, key, value)
+            if key == "Parent" then
+                local okName, name = pcall(function()
+                    return self.Name
+                end)
+                if okName and name == "toggle-note" then
+                    pcall(assign, self, key, value)
+                    return
+                end
+            end
+            return assign(self, key, value)
+        end)
+        setreadonly(mt, true)
+        getgenv().AnimeDiceNoteGuard = true
+    end
+end
+
 local Library = mainLib.Init({
     gameName = "Anime Dice",
     keyToggleUI = Enum.KeyCode.RightControl,
