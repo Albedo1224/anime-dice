@@ -132,6 +132,7 @@ local defaultSettings = {
     ["Auto Claim Quests"] = true,
     ["Auto Equip Best"] = true,
     ["Auto Claim Cash"] = true,
+    ["Auto Claim Daily"] = true,
     ["Auto Upgrade"] = true,
     ["Auto Rebirth"] = true,
     ["Auto Sell Units"] = true,
@@ -436,6 +437,7 @@ local Net = {
     UseBoost = Network.BoostService.RE.Use,
     RedeemCode = Network.CodesService.RE.RedeemCode,
     EquipGear = Network.GearService.RE.Equip,
+    ClaimDaily = Network.DailyRewardService.RE.Claim,
 }
 
 local function tryRequire(inst)
@@ -467,6 +469,8 @@ local BuffController = tryRequire(Framework.Features.Buffs.BuffController)
 local EntryRegistry = tryRequire(Framework.Features.Inventory.EntryRegistry)
 local GearCatalog = tryRequire(Framework.Features.Inventory.Kinds.Gear.GearConfig)
 local CodesConfig = tryRequire(Framework.Features.Codes.CodesConfig)
+local DailyRewardConfig = tryRequire(Framework.Features.Rewards.DailyRewardConfig)
+local MenuController = tryRequire(Framework.Features.UI.MenuController)
 
 local Farm = {
     status = "Idle",
@@ -1116,6 +1120,68 @@ local function slotBalance(data)
         end
     end
     return total
+end
+
+local function dailyMenu()
+    local playerGui = plr:FindFirstChild("PlayerGui")
+    local root = playerGui and playerGui:FindFirstChild("Root")
+    local menus = root and root:FindFirstChild("Menus")
+    return menus and menus:FindFirstChild("DailyRewards")
+end
+
+local function dailyReady(data)
+    if type(data) ~= "table" then
+        return false
+    end
+    local last = tonumber(data.LastDailyRewardClaim) or 0
+    if last == 0 then
+        return true
+    end
+    local cooldown = 82800
+    if type(DailyRewardConfig) == "table" then
+        cooldown = tonumber(DailyRewardConfig.Cooldown) or cooldown
+    end
+    return os.time() - last >= cooldown
+end
+
+local function closeDailyBoard()
+    if type(MenuController) ~= "table"
+    or type(MenuController.CloseMenu) ~= "function"
+    or type(MenuController.ActiveMenu) ~= "function" then
+        return false
+    end
+    local menu = dailyMenu()
+    if not menu then
+        return false
+    end
+    local active = nil
+    local okActive = pcall(function()
+        active = MenuController.ActiveMenu()
+    end)
+    if not okActive or active ~= menu then
+        return false
+    end
+    local ok = pcall(MenuController.CloseMenu)
+    if ok then
+        farmLog("daily", "Close daily reward")
+    end
+    return ok
+end
+
+local function claimDaily(data)
+    if Settings["Auto Claim Daily"] ~= true then
+        return false
+    end
+    if dailyReady(data) then
+        if not ready("daily", 5) then
+            return false
+        end
+        fireRemote(Net.ClaimDaily)
+        farmLog("daily", "Claim daily reward")
+        closeDailyBoard()
+        return true
+    end
+    return closeDailyBoard()
 end
 
 local function claimCash(data)
@@ -2375,6 +2441,7 @@ task.spawn(function()
         updateBlackScreen(data)
         local autoOk, autoState = syncAutoRoll()
         local claimed = claimReadyQuests()
+        local didDaily = claimDaily(data)
         local didCash = claimCash(data)
         local didEquip = equipBest()
         local didSell = sellSpareUnits(data)
@@ -2393,6 +2460,8 @@ task.spawn(function()
             setStatus("Rebirthing")
         elseif didNextTower then
             setStatus("Starting next tower")
+        elseif didDaily then
+            setStatus("Daily reward")
         elseif didCash then
             setStatus("Claiming cash")
         elseif didUpgrade then
