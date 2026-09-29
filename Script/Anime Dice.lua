@@ -438,7 +438,6 @@ local Net = {
     BuyQuest = Network.QuestService.RE.Buy,
     UseBoost = Network.BoostService.RE.Use,
     RedeemCode = Network.CodesService.RE.RedeemCode,
-    EquipGear = Network.GearService.RE.Equip,
     ClaimDaily = Network.DailyRewardService.RE.Claim,
 }
 
@@ -1909,44 +1908,15 @@ local function towerForGear(name)
     return nil
 end
 
-local function gearEquipped(data, name)
-    if type(data) ~= "table" or type(data.EquippedGear) ~= "table" then
-        return false
-    end
-    local want = string.lower(name)
-    for _, value in data.EquippedGear do
-        if type(value) == "string" and string.lower(value) == want then
-            return true
-        end
-    end
-    return false
-end
-
-local function gearSlot(name)
-    local entries = type(GearCatalog) == "table" and GearCatalog.entries or nil
-    local cfg = type(entries) == "table" and entries[name] or nil
-    if type(cfg) == "table" and type(cfg.slot) == "string" and cfg.slot ~= "" then
-        return cfg.slot
-    end
-    return "Back"
-end
-
 local function syncInfGear(data)
     if Settings["Tower Order"] ~= "InfGear" or type(data) ~= "table" then
         return
     end
     local name = InfGearName
     if gearOwned(data, name) then
-        if not gearEquipped(data, name) then
-            if ready("equipGear", 1) then
-                fireRemote(Net.EquipGear, gearSlot(name), name)
-                farmLog("gear", "Equip " .. name)
-            end
-            return
-        end
         Settings["Tower Order"] = "inf"
         Settings["Tower"] = "Infinity Tower"
-        farmLog("gear", "Equipped " .. name .. ", Infinity Tower")
+        farmLog("gear", "Owned " .. name .. ", auto-equip disabled")
         return
     end
     local towerName = towerForGear(name) or "Cursed Tower"
