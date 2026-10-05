@@ -52,6 +52,10 @@ if type(oldRemake) == "table" then
     elseif type(oldRemake.restoreTowerVisuals) == "function" then
         pcall(oldRemake.restoreTowerVisuals)
     end
+    local oldController = oldRemake.Modules and oldRemake.Modules.RollController
+    if type(oldController) == "table" and type(oldRemake.originalCutscene) == "function" then
+        oldController.PlayCutscene = oldRemake.originalCutscene
+    end
 end
 
 getgenv().AnimeDiceRuntime = (tonumber(getgenv().AnimeDiceRuntime) or 0) + 1
@@ -94,7 +98,13 @@ do
         ["Use Potions On Weather"] = false,
         ["Anti AFK"] = true,
         ["Auto Rebirth"] = false,
+        ["Auto Allocate Rebirth Stats"] = false,
+        ["Rebirth Stat Mode"] = "Priority First",
+        ["Rebirth Stat Selection"] = {},
+        ["Rebirth Stat Priority"] = "Luck, Money, Damage, Health, Trait Luck, Grade Luck",
+        ["Rebirth Stat Max Level"] = 0,
         ["Auto Equip Best"] = false,
+        ["Auto Equip Best Gear"] = false,
         ["Auto Collect"] = false,
         ["Auto Upgrade Units"] = false,
         ["Upgrade Until Level"] = 50,
@@ -103,6 +113,8 @@ do
         ["Auto Claim Daily"] = false,
         ["Auto Claim Offline"] = false,
         ["Auto Claim Group"] = false,
+        ["Auto Buy Quest Shop Items"] = false,
+        ["Quest Shop Items"] = {},
         ["Auto Upgrade Skill Tree"] = false,
         ["Skill Tree Groups"] = {},
         ["Auto Fuse"] = false,
@@ -218,6 +230,9 @@ do
         SellInventory = Network.SellService.RF.SellInventory,
         UseBoost = Network.BoostService.RE.Use,
         Rebirth = Network.RebirthService.RE.Rebirth,
+        AddRebirthStat = Network.RebirthService.RE.AddStat,
+        BuyQuestItem = Network.QuestService.RE.Buy,
+        EquipGear = Network.GearService.RE.Equip,
         CollectBalance = Network.PlotService.RE.CollectBalance,
         LevelUpSlot = Network.PlotService.RE.LevelUpSlot,
         EquipBest = Network.PlotService.RE.EquipBest,
@@ -244,8 +259,12 @@ do
         DataController = requireSafe(Framework.Features.Data.DataController),
         EntryRegistry = requireSafe(Framework.Features.Inventory.EntryRegistry),
         RollController = requireSafe(Framework.Features.Rolling.RollController),
+        RollCutscene = requireSafe(Framework.Features.Rolling.RollCutscene),
         Dice = requireSafe(Framework.Features.Rolling.Dice),
         Rebirths = requireSafe(Framework.Features.Rebirth.Rebirths),
+        RebirthStatsConfig = requireSafe(Framework.Features.Rebirth.RebirthStatsConfig),
+        QuestConfig = requireSafe(Framework.Features.Quests.QuestConfig),
+        GearConfig = requireSafe(Framework.Features.Inventory.Kinds.Gear.GearConfig),
         Upgrades = requireSafe(Framework.Features.Upgrades.Upgrades),
         UpgradeTree = requireSafe(Framework.Features.Upgrades.TreeStructure),
         Towers = requireSafe(Framework.Features.Towers.Towers),
@@ -362,14 +381,41 @@ function App.syncRollAnimation()
     end
     if App.Settings["Skip Roll Animation"] == true then
         if controller.PlayCutscene ~= App.skipCutscene then
-            App.skipCutscene = function()
+            App.skipCutscene = function(_, _, model)
+                if typeof(model) == "Instance" then
+                    model:Destroy()
+                end
             end
             controller.PlayCutscene = App.skipCutscene
         end
-    elseif App.originalCutscene and controller.PlayCutscene == App.skipCutscene then
-        controller.PlayCutscene = App.originalCutscene
+        local rollCutscene = App.Modules.RollCutscene
+        if type(rollCutscene) == "function" and not App.rollCutsceneHooked
+        and type(hookfunction) == "function" then
+            local ok, original = pcall(hookfunction, rollCutscene, App.skipCutscene)
+            if ok then
+                App.rollCutsceneTarget = rollCutscene
+                App.originalRollCutscene = type(original) == "function" and original or rollCutscene
+                App.rollCutsceneHooked = true
+            end
+        end
+    else
+        App.restoreRollAnimation()
     end
 end
+
+function App.restoreRollAnimation()
+    local controller = App.Modules.RollController
+    if type(controller) == "table" and App.originalCutscene
+    and controller.PlayCutscene == App.skipCutscene then
+        controller.PlayCutscene = App.originalCutscene
+    end
+    if App.rollCutsceneHooked and type(hookfunction) == "function" then
+        pcall(hookfunction, App.rollCutsceneTarget, App.originalRollCutscene)
+        App.rollCutsceneHooked = false
+    end
+end
+
+getgenv().AnimeDiceRestore = App.restoreRollAnimation
 
 function App.syncAutoSell(data)
     local wanted = App.Settings["Auto Sell Below"] == true
@@ -427,6 +473,241 @@ function App.usePotions(data)
                 App.fire(App.Net.UseBoost, name)
                 App.boostUntil[name] = tick() + math.max(10, duration - 2)
                 App.setStatus("Using " .. tostring(name))
+                return true
+            end
+        end
+    end
+    return false
+end
+
+function App.inventoryAmount(data, itemName)
+    local amount = 0
+    if type(data) == "table" and type(data.Inventory) == "table" then
+        for _, entry in data.Inventory do
+            if type(entry) == "table" and entry.name == itemName then
+                amount += tonumber(entry.amount) or 1
+            end
+        end
+    end
+    return amount
+end
+
+function App.buyQuestShopItems(data)
+    local selected = App.Settings["Quest Shop Items"]
+    local questConfig = App.Modules.QuestConfig
+    if App.Settings["Auto Buy Quest Shop Items"] ~= true
+    or type(data) ~= "table" or type(data.Inventory) ~= "table"
+    or type(selected) ~= "table" or type(questConfig) ~= "table"
+    or type(questConfig.Shop) ~= "table" then
+        return false
+    end
+
+    local ticketEntry = data.Inventory.Tickets
+    local tickets = type(ticketEntry) == "table" and tonumber(ticketEntry.amount) or 0
+    local pending = App.questShopPending
+    if pending then
+        local bought = pending.gamepass and type(data.OwnedGamepasses) == "table"
+            and data.OwnedGamepasses[pending.name] == true
+            or not pending.gamepass and (tickets < pending.ticketsBefore
+                or App.inventoryAmount(data, pending.name) >= pending.itemAmountBefore + pending.itemAmount)
+        if bought then
+            App.questShopPending = nil
+        elseif tick() - pending.at < 5 then
+            return false
+        else
+            App.questShopPending = nil
+        end
+    end
+    if not App.ready("questShop", 1.5) then
+        return false
+    end
+
+    for _, item in questConfig.Shop do
+        if type(item) == "table" and type(item.name) == "string"
+        and selected[item.name] == true and tickets >= (tonumber(item.tickets) or math.huge) then
+            local owned = item.gamepass == true and type(data.OwnedGamepasses) == "table"
+                and data.OwnedGamepasses[item.name] == true
+            if not owned then
+                local itemAmount = tonumber(item.amount) or 1
+                if App.fire(App.Net.BuyQuestItem, item.name) then
+                    App.questShopPending = {
+                        name = item.name,
+                        gamepass = item.gamepass == true,
+                        ticketsBefore = tickets,
+                        itemAmountBefore = App.inventoryAmount(data, item.name),
+                        itemAmount = itemAmount,
+                        at = tick(),
+                    }
+                    App.setStatus("Buying " .. item.name .. " with Tickets")
+                    return true
+                end
+            end
+        end
+    end
+    return false
+end
+
+function App.chooseRebirthStat(data)
+    local config = App.Modules.RebirthStatsConfig
+    local selection = App.Settings["Rebirth Stat Selection"]
+    if type(data) ~= "table" or type(config) ~= "table"
+    or type(config.Stats) ~= "table" or type(selection) ~= "table" then
+        return nil, 0
+    end
+
+    local stats = {}
+    local allowed = {}
+    for _, stat in config.Stats do
+        if type(stat) == "table" and type(stat.name) == "string"
+        and selection[stat.name] == true then
+            stats[#stats + 1] = stat.name
+            allowed[stat.name] = true
+        end
+    end
+    if #stats == 0 then
+        return nil, 0
+    end
+
+    local order = {}
+    local seen = {}
+    local priority = tostring(App.Settings["Rebirth Stat Priority"] or "")
+    for name in string.gmatch(priority .. ",", "(.-),") do
+        name = string.match(name, "^%s*(.-)%s*$")
+        if allowed[name] and not seen[name] then
+            order[#order + 1] = name
+            seen[name] = true
+        end
+    end
+    for _, name in stats do
+        if not seen[name] then
+            order[#order + 1] = name
+            seen[name] = true
+        end
+    end
+
+    local rebirthStats = type(data.RebirthStats) == "table" and data.RebirthStats or {}
+    local remaining = config.GetRemaining(tonumber(data.Rebirth) or 0, rebirthStats)
+    if remaining < 1 then
+        return nil, remaining
+    end
+
+    local maxLevel = math.max(0, tonumber(App.Settings["Rebirth Stat Max Level"]) or 0)
+    local target = nil
+    local lowest = math.huge
+    for _, name in order do
+        local level = tonumber(rebirthStats[name]) or 0
+        if maxLevel == 0 or level < maxLevel then
+            if not target or App.Settings["Rebirth Stat Mode"] == "Evenly" and level < lowest then
+                target = name
+                lowest = level
+            end
+        end
+    end
+    if not target then
+        return nil, remaining
+    end
+    return target, remaining
+end
+
+function App.allocateRebirthStats(data)
+    if App.Settings["Auto Allocate Rebirth Stats"] ~= true then
+        return false
+    end
+    local target, remaining = App.chooseRebirthStat(data)
+    if not target then
+        App.rebirthStatPending = nil
+        return false
+    end
+    local rebirthStats = type(data.RebirthStats) == "table" and data.RebirthStats or {}
+    local pending = App.rebirthStatPending
+    if pending then
+        if (tonumber(rebirthStats[pending.name]) or 0) > pending.level
+        or remaining < pending.remaining then
+            App.rebirthStatPending = nil
+        elseif tick() - pending.at < 1 then
+            return false
+        else
+            App.rebirthStatPending = nil
+        end
+    end
+    if not App.ready("rebirthStat", 0.5) then
+        return false
+    end
+
+    local level = tonumber(rebirthStats[target]) or 0
+    if App.fire(App.Net.AddRebirthStat, target) then
+        App.rebirthStatPending = {
+            name = target,
+            level = level,
+            remaining = remaining,
+            at = tick(),
+        }
+        App.setStatus("Allocating rebirth point to " .. target)
+        return true
+    end
+    return false
+end
+
+function App.gearScore(name)
+    if type(name) ~= "string" or type(App.Modules.EntryRegistry) ~= "table" then
+        return nil
+    end
+    local ok, config = pcall(App.Modules.EntryRegistry.getEntryConfig, name)
+    if not ok or type(config) ~= "table" or config.kind ~= "Gear" then
+        return nil
+    end
+    local score = 0
+    for _, buff in config.buffs or {} do
+        local amount = type(buff) == "table" and tonumber(buff.amount) or nil
+        if amount then
+            score += buff.bucket == "multiplier" and math.max(0, amount - 1) or amount
+        end
+    end
+    return score, config.slot
+end
+
+function App.equipBestGear(data)
+    local gearConfig = App.Modules.GearConfig
+    if App.Settings["Auto Equip Best Gear"] ~= true
+    or type(data) ~= "table" or type(data.Inventory) ~= "table"
+    or type(gearConfig) ~= "table" or type(gearConfig.slots) ~= "table" then
+        return false
+    end
+
+    local equipped = type(data.EquippedGear) == "table" and data.EquippedGear or {}
+    local pending = App.gearEquipPending
+    if pending then
+        if equipped[pending.slot] == pending.name then
+            App.gearEquipPending = nil
+        elseif tick() - pending.at < 1 then
+            return false
+        else
+            App.gearEquipPending = nil
+        end
+    end
+
+    local best = {}
+    for _, entry in data.Inventory do
+        if type(entry) == "table" and (tonumber(entry.amount) or 0) > 0 then
+            local score, slot = App.gearScore(entry.name)
+            local current = score and type(slot) == "string" and best[slot] or nil
+            if score and type(slot) == "string" and (not current or score > current.score
+            or score == current.score and entry.name < current.name) then
+                best[slot] = { name = entry.name, score = score }
+            end
+        end
+    end
+
+    for _, slot in gearConfig.slots do
+        local candidate = best[slot]
+        local currentName = equipped[slot]
+        local currentScore = App.gearScore(currentName)
+        if candidate and candidate.name ~= currentName
+        and candidate.score > (currentScore or -math.huge)
+        and App.ready("gearEquip", 0.75) then
+            if App.fire(App.Net.EquipGear, slot, candidate.name) then
+                App.gearEquipPending = { slot = slot, name = candidate.name, at = tick() }
+                App.setStatus("Equipping " .. candidate.name)
                 return true
             end
         end
@@ -1051,6 +1332,40 @@ do
         return result
     end
 
+    local function questShopOptions()
+        local result = {}
+        local config = App.Modules.QuestConfig
+        local selected = App.Settings["Quest Shop Items"]
+        if type(selected) ~= "table" then
+            selected = {}
+        end
+        if type(config) == "table" then
+            for _, item in config.Shop or {} do
+                if type(item) == "table" and type(item.name) == "string" then
+                    result[item.name] = selected[item.name] == true
+                end
+            end
+        end
+        return result
+    end
+
+    local function rebirthStatOptions()
+        local result = {}
+        local config = App.Modules.RebirthStatsConfig
+        local selected = App.Settings["Rebirth Stat Selection"]
+        if type(selected) ~= "table" then
+            selected = {}
+        end
+        if type(config) == "table" then
+            for _, stat in config.Stats or {} do
+                if type(stat) == "table" and type(stat.name) == "string" then
+                    result[stat.name] = selected[stat.name] == true
+                end
+            end
+        end
+        return result
+    end
+
     local Library = mainLib.Init({
         gameName = "Anime Dice Remake",
         keyToggleUI = Enum.KeyCode.RightControl,
@@ -1069,7 +1384,7 @@ do
         sectionSearch = true,
     })
     Roll.CheckBox({ title = "Auto Roll", description = "Keeps the game's replicated auto roll enabled.", isVisible = true, isChecked = App.Settings["Auto Roll"], callback = function(value) App.Settings["Auto Roll"] = value end })
-    Roll.CheckBox({ title = "Skip Roll Animation", description = "Skips only the exported roll cutscene function.", isVisible = true, isChecked = App.Settings["Skip Roll Animation"], callback = function(value) App.Settings["Skip Roll Animation"] = value end })
+    Roll.CheckBox({ title = "Auto Hide Roll Animation", description = "Hides the roll cutscene and animation while keeping the roll results.", searchAliases = { "skip roll animation", "fast roll", "hide roll" }, isVisible = true, isChecked = App.Settings["Skip Roll Animation"], callback = function(value) App.Settings["Skip Roll Animation"] = value end })
     App.statusLabel = Roll.Label({ title = "Status: Starting", searchAliases = "farm status", isVisible = true, isBold = true })
 
     local Sell = Automation.createSection({ sectionName = "Auto Sell", sectionIcon = "badge-dollar-sign", sectionSearch = true })
@@ -1093,10 +1408,18 @@ do
     local Progression = Library.createPage({ pageName = "Progression", pageTitle = "Progression", pageIcon = "trending-up" })
     local Plot = Progression.createSection({ sectionName = "Rebirth And Plot", sectionIcon = "star", sectionSearch = true })
     Plot.CheckBox({ title = "Auto Rebirth", description = "Rebirths when the replicated money meets the next cost.", isVisible = true, isChecked = App.Settings["Auto Rebirth"], callback = function(value) App.Settings["Auto Rebirth"] = value end })
+    Plot.CheckBox({ title = "Auto Equip Best Gear", description = "Equips the owned gear with the strongest combined buffs in each slot.", isVisible = true, isChecked = App.Settings["Auto Equip Best Gear"], callback = function(value) App.Settings["Auto Equip Best Gear"] = value end })
     Plot.CheckBox({ title = "Auto Equip Best", description = "Equips the best available plot units.", isVisible = true, isChecked = App.Settings["Auto Equip Best"], callback = function(value) App.Settings["Auto Equip Best"] = value end })
     Plot.CheckBox({ title = "Auto Collect", description = "Collects replicated plot balances.", isVisible = true, isChecked = App.Settings["Auto Collect"], callback = function(value) App.Settings["Auto Collect"] = value end })
     Plot.CheckBox({ title = "Auto Upgrade Units", description = "Levels placed units up to the selected limit.", isVisible = true, isChecked = App.Settings["Auto Upgrade Units"], callback = function(value) App.Settings["Auto Upgrade Units"] = value end })
     Plot.Slider({ title = "Upgrade Until Level", description = "Stops upgrading a placed unit at this level.", isVisible = true, minValue = 1, maxValue = 100, defaultValue = App.Settings["Upgrade Until Level"], precise = false, callback = function(value) App.Settings["Upgrade Until Level"] = value end })
+
+    local RebirthStats = Progression.createSection({ sectionName = "Rebirth Stats", sectionIcon = "star", sectionSearch = true })
+    RebirthStats.CheckBox({ title = "Auto Allocate Rebirth Stats", description = "Spends available rebirth points on the selected stats.", isVisible = true, isChecked = App.Settings["Auto Allocate Rebirth Stats"], callback = function(value) App.Settings["Auto Allocate Rebirth Stats"] = value end })
+    RebirthStats.Select({ title = "Selected Stats", dropdowntitle = "Stats", description = "Choose which stats automatic allocation may spend points on.", isVisible = true, search = true, options = rebirthStatOptions(), disableSelectedLayoutOrder = true, callback = function(name, enabled) App.Settings["Rebirth Stat Selection"][name] = enabled end })
+    RebirthStats.Select({ title = "Allocation Mode", dropdowntitle = "Mode", description = "Priority First fills each stat to Max Level before moving down the order. Evenly balances selected stat levels.", isVisible = true, search = false, options = { "Priority First", "Evenly" }, defaultValue = App.Settings["Rebirth Stat Mode"], callback = function(value) App.Settings["Rebirth Stat Mode"] = value end })
+    RebirthStats.Box({ title = "Priority Order", description = "Comma-separated stat order, for example Luck, Money, Damage. This order breaks ties in Evenly mode.", searchAliases = { "rebirth stat order", "max first" }, isVisible = true, numberOnly = false, clearTextOnFocus = false, clearTextOnCallback = false, defaultValue = App.Settings["Rebirth Stat Priority"], callback = function(value) App.Settings["Rebirth Stat Priority"] = tostring(value) end })
+    RebirthStats.Box({ title = "Max Level Per Stat", description = "Optional target level. Reaching it advances to the next stat; use 0 for no cap.", searchAliases = { "stat cap", "target level" }, isVisible = true, numberOnly = true, clearTextOnFocus = false, clearTextOnCallback = false, defaultValue = App.Settings["Rebirth Stat Max Level"], callback = function(value) App.Settings["Rebirth Stat Max Level"] = math.max(0, math.floor(tonumber(value) or 0)) end })
 
     local DiceShop = Progression.createSection({ sectionName = "Dice Shop", sectionIcon = "store", sectionSearch = true })
     DiceShop.CheckBox({ title = "Auto Dice Shop", description = "Buys the cheapest affordable unowned die.", isVisible = true, isChecked = App.Settings["Auto Dice Shop"], callback = function(value) App.Settings["Auto Dice Shop"] = value end })
@@ -1106,6 +1429,10 @@ do
     Rewards.CheckBox({ title = "Auto Claim Daily", description = "Requests an available daily reward.", isVisible = true, isChecked = App.Settings["Auto Claim Daily"], callback = function(value) App.Settings["Auto Claim Daily"] = value end })
     Rewards.CheckBox({ title = "Auto Claim Offline", description = "Claims replicated offline earnings when pending.", isVisible = true, isChecked = App.Settings["Auto Claim Offline"], callback = function(value) App.Settings["Auto Claim Offline"] = value end })
     Rewards.CheckBox({ title = "Auto Claim Group", description = "Claims the group reward when it is unclaimed.", isVisible = true, isChecked = App.Settings["Auto Claim Group"], callback = function(value) App.Settings["Auto Claim Group"] = value end })
+
+    local QuestShop = Progression.createSection({ sectionName = "Quest Shop", sectionIcon = "ticket", sectionSearch = true })
+    QuestShop.CheckBox({ title = "Auto Buy Quest Shop Items", description = "Buys selected items with Tickets whenever you can afford them.", isVisible = true, isChecked = App.Settings["Auto Buy Quest Shop Items"], callback = function(value) App.Settings["Auto Buy Quest Shop Items"] = value end })
+    QuestShop.Select({ title = "Ticket Items", dropdowntitle = "Items", description = "Choose which Quest Shop items automatic buying may purchase.", searchAliases = { "quest shop", "tickets", "ticket item" }, isVisible = true, search = true, options = questShopOptions(), disableSelectedLayoutOrder = true, callback = function(name, enabled) App.Settings["Quest Shop Items"][name] = enabled end })
 
     local SkillTree = Progression.createSection({ sectionName = "Skill Tree", sectionIcon = "git-branch", sectionSearch = true })
     SkillTree.CheckBox({ title = "Auto Upgrade Skill Tree", description = "Buys the cheapest affordable upgrade with an owned parent.", isVisible = true, isChecked = App.Settings["Auto Upgrade Skill Tree"], callback = function(value) App.Settings["Auto Upgrade Skill Tree"] = value end })
@@ -1216,6 +1543,9 @@ task.spawn(function()
             App.syncAutoSell(data)
             App.usePotions(data)
             App.progress(data)
+            App.buyQuestShopItems(data)
+            App.allocateRebirthStats(data)
+            App.equipBestGear(data)
             App.buyDice(data)
             App.claimRewards(data)
             App.upgradeTree(data)
