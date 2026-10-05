@@ -300,13 +300,16 @@ function App.parseSellBelow(value)
     if not amount then
         local number, suffix = string.match(
             string.lower(string.gsub(tostring(value), "%s+", "")),
-            "^([%d]*%.?[%d]+)([kmbtq])$"
+            "^([%d]*%.?[%d]+)(%a+)$"
         )
-        local powers = { k = 3, m = 6, b = 9, t = 12, q = 15 }
-        amount = tonumber(number)
-        amount = amount and amount * 10 ^ powers[suffix] or nil
+        local powers = { k = 3, m = 6, b = 9, t = 12, q = 15, sx = 21 }
+        local power = powers[suffix]
+        if not power then
+            return nil
+        end
+        amount = tonumber(number) * 10 ^ power
     end
-    if not amount then
+    if not amount or amount ~= amount then
         return nil
     end
     return math.min(1e26, math.max(0, amount))
@@ -1071,7 +1074,7 @@ do
 
     local Sell = Automation.createSection({ sectionName = "Auto Sell", sectionIcon = "badge-dollar-sign", sectionSearch = true })
     Sell.CheckBox({ title = "Auto Sell Below", description = "Uses the game's native auto sell threshold.", isVisible = true, isChecked = App.Settings["Auto Sell Below"], callback = function(value) App.Settings["Auto Sell Below"] = value end })
-    App.sellBelowBox = Sell.Box({ title = "Sell Below 1 In", description = "Enter a number or shorthand such as 1k, 2m, 1t, or 1q.", searchAliases = { "odds", "rarity", "amount" }, isVisible = true, numberOnly = false, clearTextOnFocus = false, clearTextOnCallback = false, defaultValue = App.Settings["Sell Below"], callback = function(value)
+    App.sellBelowBox = Sell.Box({ title = "Sell Below 1 In", description = "Enter a number or shorthand such as 1k, 2m, 1q, or 1sx.", searchAliases = { "odds", "rarity", "amount" }, isVisible = true, numberOnly = false, clearTextOnFocus = false, clearTextOnCallback = false, defaultValue = App.Settings["Sell Below"], callback = function(value)
         local amount = App.parseSellBelow(value)
         if amount then
             App.Settings["Sell Below"] = amount
