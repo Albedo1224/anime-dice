@@ -1,5 +1,3 @@
-random00 = "how to hide a dead body"
-
 repeat task.wait()
 until game:IsLoaded() and game:FindFirstChild("CoreGui") and pcall(function() return game.CoreGui end)
 
