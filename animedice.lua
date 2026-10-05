@@ -111,6 +111,8 @@ do
         ["Auto Dice Shop"] = false,
         ["Auto Equip Best Dice"] = false,
         ["Auto Claim Daily"] = false,
+        ["Auto Claim Quests"] = false,
+        ["Auto Redeem Codes"] = false,
         ["Auto Claim Offline"] = false,
         ["Auto Claim Group"] = false,
         ["Auto Buy Quest Shop Items"] = false,
@@ -243,6 +245,8 @@ do
         BuyDice = Network.DiceShopService.RE.BuyDice,
         EquipDice = Network.DiceShopService.RE.EquipDice,
         ClaimDaily = Network.DailyRewardService.RE.Claim,
+        ClaimQuest = Network.QuestService.RE.Claim,
+        RedeemCode = Network.CodesService.RE.RedeemCode,
         ClaimOffline = Network.OfflineEarningsService.RE.Claim,
         ClaimGroup = Network.GroupRewardService.RE.Claim,
         Fuse = Network.FusingService.RE.Fuse,
@@ -264,6 +268,7 @@ do
         Rebirths = requireSafe(Framework.Features.Rebirth.Rebirths),
         RebirthStatsConfig = requireSafe(Framework.Features.Rebirth.RebirthStatsConfig),
         QuestConfig = requireSafe(Framework.Features.Quests.QuestConfig),
+        CodesConfig = requireSafe(Framework.Features.Codes.CodesConfig),
         GearConfig = requireSafe(Framework.Features.Inventory.Kinds.Gear.GearConfig),
         Upgrades = requireSafe(Framework.Features.Upgrades.Upgrades),
         UpgradeTree = requireSafe(Framework.Features.Upgrades.TreeStructure),
@@ -812,6 +817,105 @@ function App.claimRewards(data)
         App.dailyClaimState = dailyState
         App.fire(App.Net.ClaimDaily)
     end
+end
+
+function App.claimQuests(data)
+    local config = App.Modules.QuestConfig
+    if App.Settings["Auto Claim Quests"] ~= true or type(data) ~= "table"
+    or type(data.Quests) ~= "table" or type(config) ~= "table"
+    or type(config.Periods) ~= "table" then
+        return false
+    end
+
+    local pending = App.questClaimPending
+    if pending then
+        local state = data.Quests[pending.period]
+        if type(state) ~= "table" then
+            return false
+        end
+        if tonumber(state.expiresAt) == pending.expiresAt
+        and type(state.claimed) == "table" and state.claimed[pending.id] ~= true
+        and tick() - pending.at < 3 then
+            return false
+        end
+        if tonumber(state.expiresAt) == pending.expiresAt
+        and type(state.claimed) == "table" and state.claimed[pending.id] == true then
+            App.questClaimPending = nil
+            return false
+        end
+        App.questClaimPending = nil
+    end
+
+    if not App.ready("questClaim", 1) then
+        return false
+    end
+    for _, period in { "Daily", "Weekly" } do
+        local state = data.Quests[period]
+        local periodConfig = config.Periods[period]
+        local expiresAt = type(state) == "table" and tonumber(state.expiresAt) or nil
+        if expiresAt and expiresAt > 0 and type(state.progress) == "table"
+        and type(state.claimed) == "table" and type(periodConfig) == "table" then
+            for _, quest in periodConfig.quests or {} do
+                local progress = type(quest) == "table" and tonumber(state.progress[quest.id]) or nil
+                local target = type(quest) == "table" and tonumber(quest.target) or nil
+                if type(quest) == "table" and type(quest.id) == "string"
+                and progress and target and progress >= target
+                and state.claimed[quest.id] ~= true then
+                    if App.fire(App.Net.ClaimQuest, period, quest.id, expiresAt) then
+                        App.questClaimPending = {
+                            period = period,
+                            id = quest.id,
+                            expiresAt = expiresAt,
+                            at = tick(),
+                        }
+                        App.setStatus("Claiming " .. period .. " quest: " .. tostring(quest.title or quest.id))
+                        return true
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+function App.redeemCodes(data)
+    local codesConfig = App.Modules.CodesConfig
+    if App.Settings["Auto Redeem Codes"] ~= true or type(data) ~= "table"
+    or type(data.RedeemedCodes) ~= "table" or type(codesConfig) ~= "table" then
+        return false
+    end
+
+    local pending = App.codeRedeemPending
+    if pending then
+        if data.RedeemedCodes[pending.code] == true then
+            App.codeRedeemPending = nil
+            return false
+        end
+        if tick() - pending.at < 4 then
+            return false
+        end
+        App.codeRedeemPending = nil
+    end
+    if not App.ready("redeemCode", 1) then
+        return false
+    end
+
+    local codes = {}
+    for code in codesConfig do
+        if type(code) == "string" then
+            codes[#codes + 1] = code
+        end
+    end
+    table.sort(codes)
+    for _, code in codes do
+        if data.RedeemedCodes[code] ~= true
+        and App.fire(App.Net.RedeemCode, code) then
+            App.codeRedeemPending = { code = code, at = tick() }
+            App.setStatus("Redeeming code " .. code)
+            return true
+        end
+    end
+    return false
 end
 
 function App.parentOwned(owned, name)
@@ -1427,6 +1531,8 @@ do
 
     local Rewards = Progression.createSection({ sectionName = "Rewards", sectionIcon = "gift", sectionSearch = true })
     Rewards.CheckBox({ title = "Auto Claim Daily", description = "Requests an available daily reward.", isVisible = true, isChecked = App.Settings["Auto Claim Daily"], callback = function(value) App.Settings["Auto Claim Daily"] = value end })
+    Rewards.CheckBox({ title = "Auto Claim Quests", description = "Claims completed Daily and Weekly quests.", isVisible = true, isChecked = App.Settings["Auto Claim Quests"], callback = function(value) App.Settings["Auto Claim Quests"] = value end })
+    Rewards.CheckBox({ title = "Auto Redeem Codes", description = "Redeems unused codes listed in the game config.", isVisible = true, isChecked = App.Settings["Auto Redeem Codes"], callback = function(value) App.Settings["Auto Redeem Codes"] = value end })
     Rewards.CheckBox({ title = "Auto Claim Offline", description = "Claims replicated offline earnings when pending.", isVisible = true, isChecked = App.Settings["Auto Claim Offline"], callback = function(value) App.Settings["Auto Claim Offline"] = value end })
     Rewards.CheckBox({ title = "Auto Claim Group", description = "Claims the group reward when it is unclaimed.", isVisible = true, isChecked = App.Settings["Auto Claim Group"], callback = function(value) App.Settings["Auto Claim Group"] = value end })
 
@@ -1548,6 +1654,8 @@ task.spawn(function()
             App.equipBestGear(data)
             App.buyDice(data)
             App.claimRewards(data)
+            App.claimQuests(data)
+            App.redeemCodes(data)
             App.upgradeTree(data)
             App.fuse(data)
             App.rollAttribute(data, "Trait")
