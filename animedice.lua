@@ -135,6 +135,8 @@ do
         ["Auto Equip Best Team"] = true,
         ["Auto Tower"] = false,
         ["Black Screen"] = false,
+        ["FPS Boost"] = false,
+        ["Delete Map"] = false,
         ["Trade Player"] = nil,
         ["Trade Entries"] = {},
         ["Trade Amount"] = 1,
@@ -257,6 +259,7 @@ do
         ChangeOffer = Network.TradeService.RE.ChangeOffer,
         AdvanceTrade = Network.TradeService.RE.AdvanceTrade,
         CancelTrade = Network.TradeService.RE.CancelTrade,
+        SetTradeRequestsEnabled = Network.TradeService.RE.SetTradeRequestsEnabled,
         TradeEvent = Network.TradeService.RE.TradeEvent,
     }
     App.Modules = {
@@ -277,6 +280,7 @@ do
         FusingUtil = requireSafe(Framework.Features.Fusing.FusingUtil),
         Traits = requireSafe(Framework.Features.Traits.Traits),
         Grades = requireSafe(Framework.Features.Grades.Grades),
+        TradeConfig = requireSafe(Framework.Features.Trading.TradeConfig),
     }
 end
 
@@ -1282,11 +1286,60 @@ function App.updateBlackScreen()
     end
 end
 
+function App.boostFps()
+    if App.fpsApplied then
+        return
+    end
+    App.fpsApplied = true
+    pcall(function()
+        settings().Rendering.QualityLevel = Enum.QualityLevel.Level01
+        game.Lighting.GlobalShadows = false
+    end)
+    local removed = 0
+    for _, item in game.Lighting:GetChildren() do
+        if not item:IsA("Sky") then
+            item:Destroy()
+            removed = removed + 1
+        end
+    end
+    for _, item in workspace:GetDescendants() do
+        if item:IsA("ParticleEmitter") or item:IsA("Trail") or item:IsA("Beam")
+        or item:IsA("Smoke") or item:IsA("Fire") or item:IsA("Sparkles")
+        or item:IsA("Decal") or item:IsA("Texture") then
+            item:Destroy()
+            removed = removed + 1
+        elseif item:IsA("BasePart") then
+            item.Reflectance = 0
+        end
+    end
+    App.setStatus("FPS boost stripped " .. tostring(removed) .. " effects")
+end
+
+function App.deleteMap()
+    if App.mapDeleted then
+        return
+    end
+    App.mapDeleted = true
+    local removed = 0
+    for _, name in { "Map", "AuraFuseMachine" } do
+        local item = workspace:FindFirstChild(name)
+        if item then
+            item:Destroy()
+            removed = removed + 1
+        end
+    end
+    App.setStatus("Deleted " .. tostring(removed) .. " map models")
+end
+
 function App.cleanupTowerUi()
     if App.blackScreenGui then
         App.blackScreenGui:Destroy()
         App.blackScreenGui = nil
         App.blackStatus = nil
+    end
+    if App.tradeConnection then
+        App.tradeConnection:Disconnect()
+        App.tradeConnection = nil
     end
 end
 
@@ -1310,8 +1363,25 @@ function App.sendTradeRequest()
         App.setStatus("Trade player not found")
         return false
     end
-    App.fire(App.Net.RequestTrade, player)
-    App.setStatus("Trade request sent to " .. player.Name)
+    if not App.ready("tradeRequest", 6) then
+        App.setStatus("Wait before sending another trade request")
+        return false
+    end
+    App.trade.requestPending = player
+    local ok = App.fire(App.Net.RequestTrade, player)
+    if not ok then
+        App.trade.requestPending = nil
+        App.setStatus("Trade request failed")
+        return false
+    end
+    App.setStatus("Sending trade request to " .. player.Name)
+    task.delay(6, function()
+        if generation == getgenv().AnimeDiceRemakeGeneration
+        and App.trade.requestPending == player then
+            App.trade.requestPending = nil
+            App.setStatus("Trade request was not accepted by the server")
+        end
+    end)
     return true
 end
 
@@ -1327,21 +1397,74 @@ function App.acceptAllowed(player)
         or list[tostring(player.UserId)] == true)
 end
 
+function App.syncTradeRequests(data)
+    if App.Settings["Auto Accept Trades"] == true and type(data) == "table"
+    and data.TradeRequestsEnabled ~= true and App.ready("tradeRequests", 1) then
+        App.fire(App.Net.SetTradeRequestsEnabled, true)
+    end
+end
+
+function App.tradeEntryInfo(key, entry)
+    if type(entry) ~= "table" or type(entry.name) ~= "string" then
+        return false, false
+    end
+    local config = App.Modules.TradeConfig
+    if type(config) == "table" and table.find(config.UNTRADEABLE_ENTRIES or {}, entry.name) then
+        return false, false
+    end
+    local registry = App.Modules.EntryRegistry
+    if type(registry) ~= "table" then
+        return false, false
+    end
+    local okEntry, entryConfig = pcall(registry.getEntryConfig, entry.name)
+    local okKind, kindConfig = pcall(
+        registry.getKindConfig,
+        okEntry and entryConfig and entryConfig.kind
+    )
+    if not okKind or type(kindConfig) ~= "table" then
+        return false, false
+    end
+    return not kindConfig.stackable or key == entry.name, kindConfig.stackable == true
+end
+
+function App.tradeAmount(value)
+    local amount = tonumber(value == nil and App.Settings["Trade Amount"] or value) or 1
+    if amount ~= amount or math.abs(amount) == math.huge then
+        return 1
+    end
+    amount = math.floor(amount)
+    return math.min(9007199254740991, math.max(1, amount))
+end
+
+function App.wantedTradeAmount(key, entry)
+    local tradeable, stackable = App.tradeEntryInfo(key, entry)
+    if not tradeable then
+        return nil
+    end
+    if not stackable then
+        return 1
+    end
+    local available = math.max(0, math.floor(tonumber(entry.amount) or 0))
+    if App.Settings["Send Max Quantity"] == true then
+        return available
+    end
+    return math.min(available, App.tradeAmount())
+end
+
 function App.offerTradeEntries(data)
     local state = App.trade.state
     if type(state) ~= "table" or state.phase ~= "Offer" or type(data) ~= "table" then
         return false
     end
     local selected = App.Settings["Trade Entries"]
-    local amount = math.max(1, tonumber(App.Settings["Trade Amount"]) or 1)
     for label, on in selected or {} do
         local key = on and App.tradeLabels[label] or nil
         local entry = key and data.Inventory and data.Inventory[key] or nil
         if entry then
-            local wanted = App.Settings["Send Max Quantity"] == true
-                and (tonumber(entry.amount) or 1) or amount
+            local wanted = App.wantedTradeAmount(key, entry)
             local current = state.ownOffer and tonumber(state.ownOffer[key]) or 0
-            if current < wanted and App.ready("offer:" .. key, 0.4) then
+            if wanted and wanted > 0 and current ~= wanted
+            and App.ready("offer:" .. key, 0.4) then
                 App.fire(App.Net.ChangeOffer, key, wanted - current)
                 return true
             end
@@ -1350,7 +1473,27 @@ function App.offerTradeEntries(data)
     return false
 end
 
-App.Net.TradeEvent.OnClientEvent:Connect(function(event, payload)
+function App.tradeOffersReady(data)
+    local state = App.trade.state
+    if type(state) ~= "table" or state.phase ~= "Offer" or type(data) ~= "table" then
+        return false
+    end
+    local selected = 0
+    for label, on in App.Settings["Trade Entries"] or {} do
+        local key = on and App.tradeLabels[label] or nil
+        local entry = key and data.Inventory and data.Inventory[key] or nil
+        local wanted = entry and App.wantedTradeAmount(key, entry) or nil
+        if wanted and wanted > 0 then
+            selected = selected + 1
+            if not state.ownOffer or tonumber(state.ownOffer[key]) ~= wanted then
+                return false
+            end
+        end
+    end
+    return selected > 0
+end
+
+App.tradeConnection = App.Net.TradeEvent.OnClientEvent:Connect(function(event, payload)
     if generation ~= getgenv().AnimeDiceRemakeGeneration then
         return
     end
@@ -1360,6 +1503,13 @@ App.Net.TradeEvent.OnClientEvent:Connect(function(event, payload)
         and App.acceptAllowed(App.trade.request) then
             App.fire(App.Net.RespondTrade, true)
         end
+    elseif event == "RequestSent" then
+        App.trade.requestPending = nil
+        App.trade.requested = payload and payload.player
+        App.setStatus("Trade request sent to " .. tostring(App.trade.requested and App.trade.requested.Name))
+    elseif event == "RequestClosed" or event == "RequestExpired" then
+        App.trade.requestPending = nil
+        App.trade.requested = nil
     elseif event == "Started" then
         App.trade.partner = payload and payload.partner
         App.trade.state = nil
@@ -1508,6 +1658,8 @@ do
     local Misc = Automation.createSection({ sectionName = "Misc", sectionIcon = "shield", sectionSearch = true })
     Misc.CheckBox({ title = "Anti AFK", description = "Prevents the idle timeout while this runtime is active.", isVisible = true, isChecked = App.Settings["Anti AFK"], callback = function(value) App.Settings["Anti AFK"] = value end })
     Misc.CheckBox({ title = "Black Screen", description = "Covers the full screen while keeping tower status visible.", searchAliases = { "blank screen", "performance" }, isVisible = true, isChecked = App.Settings["Black Screen"], callback = function(value) App.Settings["Black Screen"] = value; App.updateBlackScreen() end })
+    Misc.CheckBox({ title = "FPS Boost", description = "Lowers rendering quality and removes current visual effects for this session.", searchAliases = { "performance", "lag", "effects" }, isVisible = true, isChecked = App.Settings["FPS Boost"], callback = function(value) App.Settings["FPS Boost"] = value; if value then App.boostFps() end end })
+    Misc.CheckBox({ title = "Delete Map", description = "Deletes the map and aura fuse machine for this session.", searchAliases = { "remove map", "lag" }, isVisible = true, isChecked = App.Settings["Delete Map"], callback = function(value) App.Settings["Delete Map"] = value; if value then App.deleteMap() end end })
 
     local Progression = Library.createPage({ pageName = "Progression", pageTitle = "Progression", pageIcon = "trending-up" })
     local Plot = Progression.createSection({ sectionName = "Rebirth And Plot", sectionIcon = "star", sectionSearch = true })
@@ -1578,7 +1730,7 @@ do
     local Send = TradePage.createSection({ sectionName = "Send Trade", sectionIcon = "send", sectionSearch = true })
     App.playerSelect = Send.Select({ title = "Player", dropdowntitle = "Player", description = "Player who receives the trade request.", isVisible = true, search = true, options = {}, defaultValue = App.Settings["Trade Player"], callback = function(value) App.Settings["Trade Player"] = value end })
     App.tradeEntrySelect = Send.Select({ title = "Items And Units", dropdowntitle = "Entries", description = "Entries to add after a trade starts.", isVisible = true, search = true, options = { ["No entries"] = false }, disableSelectedLayoutOrder = true, callback = function(name, enabled) App.Settings["Trade Entries"][name] = enabled end })
-    Send.Slider({ title = "Amount Per Item", description = "Amount offered for stackable entries.", isVisible = true, minValue = 1, maxValue = 100, defaultValue = App.Settings["Trade Amount"], precise = false, callback = function(value) App.Settings["Trade Amount"] = value end })
+    Send.Box({ title = "Amount Per Item", description = "Amount offered for stackable entries, limited only by the quantity owned.", searchAliases = { "trade amount", "quantity" }, isVisible = true, numberOnly = true, clearTextOnFocus = false, clearTextOnCallback = false, defaultValue = App.Settings["Trade Amount"], callback = function(value) App.Settings["Trade Amount"] = App.tradeAmount(value) end })
     Send.CheckBox({ title = "Send Max Quantity", description = "Offers every available copy of selected stackable entries.", isVisible = true, isChecked = App.Settings["Send Max Quantity"], callback = function(value) App.Settings["Send Max Quantity"] = value end })
     Send.Button({ title = "Send Trade", description = "Sends a trade request to the selected player.", isVisible = true, buttonTitle = "Send", callback = App.sendTradeRequest })
     Send.CheckBox({ title = "Auto Send At Amount", description = "Advances the trade after selected entries are offered.", isVisible = true, isChecked = App.Settings["Auto Send Trade"], callback = function(value) App.Settings["Auto Send Trade"] = value end })
@@ -1604,8 +1756,10 @@ do
                         unitOptions[#unitOptions + 1] = label
                         App.unitLabels[label] = key
                     end
-                    tradeOptions[label] = App.Settings["Trade Entries"][label] == true
-                    App.tradeLabels[label] = key
+                    if App.tradeEntryInfo(key, entry) then
+                        tradeOptions[label] = App.Settings["Trade Entries"][label] == true
+                        App.tradeLabels[label] = key
+                    end
                 end
             end
         end
@@ -1663,9 +1817,13 @@ task.spawn(function()
             App.tower(data)
             App.updateTowerStatus()
             App.updateBlackScreen()
+            if App.Settings["FPS Boost"] == true then App.boostFps() end
+            if App.Settings["Delete Map"] == true then App.deleteMap() end
+            App.syncTradeRequests(data)
             App.offerTradeEntries(data)
             if App.Settings["Auto Send Trade"] == true and type(App.trade.state) == "table"
-            and App.trade.state.phase == "Offer" and App.ready("advance", 1.5) then
+            and App.trade.state.phase == "Offer" and App.tradeOffersReady(data)
+            and App.ready("advance", 1.5) then
                 App.fire(App.Net.AdvanceTrade)
             end
             if tick() >= refreshAt then
