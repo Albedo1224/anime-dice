@@ -1,3 +1,5 @@
+random00 = "how to hide a dead body"
+
 repeat task.wait()
 until game:IsLoaded() and game:FindFirstChild("CoreGui") and pcall(function() return game.CoreGui end)
 
@@ -72,6 +74,8 @@ local App = {
     boostUntil = {},
     unitLabels = {},
     tradeLabels = {},
+    claimCache = {},
+    disconnects = {},
     towerRuns = 0,
     towerFloors = 0,
     towerBest = 0,
@@ -210,7 +214,8 @@ do
     save(true)
     task.spawn(function()
         while generation == getgenv().AnimeDiceRemakeGeneration do
-            task.wait(2)
+            task.wait(10)
+            if generation ~= getgenv().AnimeDiceRemakeGeneration then break end
             save(false)
         end
     end)
@@ -263,6 +268,8 @@ do
         TradeEvent = Network.TradeService.RE.TradeEvent,
     }
     App.Modules = {
+        DataClient = requireSafe(ReplicatedStorage.Packages.Data.Client),
+        DailyRewardConfig = requireSafe(Framework.Features.Rewards.DailyRewardConfig),
         DataController = requireSafe(Framework.Features.Data.DataController),
         EntryRegistry = requireSafe(Framework.Features.Inventory.EntryRegistry),
         RollController = requireSafe(Framework.Features.Rolling.RollController),
@@ -285,8 +292,8 @@ do
 end
 
 function App.data()
-    local ok, client = pcall(require, ReplicatedStorage.Packages.Data.Client)
-    if not ok or type(client) ~= "table" then
+    local client = App.Modules.DataClient
+    if type(client) ~= "table" then
         return nil
     end
     local root = rawget(client, "data")
@@ -303,6 +310,7 @@ function App.ready(key, delay)
 end
 
 function App.fire(remote, ...)
+    if generation ~= getgenv().AnimeDiceRemakeGeneration then return false end
     local args = { ... }
     return pcall(function()
         remote:FireServer(unpack(args))
@@ -310,6 +318,7 @@ function App.fire(remote, ...)
 end
 
 function App.invoke(remote, ...)
+    if generation ~= getgenv().AnimeDiceRemakeGeneration then return false end
     local args = { ... }
     return pcall(function()
         return remote:InvokeServer(unpack(args))
@@ -317,7 +326,9 @@ function App.invoke(remote, ...)
 end
 
 function App.setStatus(text)
-    App.status = tostring(text)
+    text = tostring(text)
+    if App.status == text then return end
+    App.status = text
     if App.statusLabel and App.statusLabel.setText then
         pcall(App.statusLabel.setText, "Status: " .. App.status)
     end
@@ -679,7 +690,8 @@ function App.equipBestGear(data)
     local gearConfig = App.Modules.GearConfig
     if App.Settings["Auto Equip Best Gear"] ~= true
     or type(data) ~= "table" or type(data.Inventory) ~= "table"
-    or type(gearConfig) ~= "table" or type(gearConfig.slots) ~= "table" then
+    or type(gearConfig) ~= "table" or type(gearConfig.slots) ~= "table"
+    or not App.ready("gearScan", 5) then
         return false
     end
 
@@ -803,23 +815,60 @@ function App.buyDice(data)
     return true
 end
 
+-- Keep failed requests separate from confirmed claims. RemoteEvents have no result.
+function App.claimState(key, version)
+    local state = App.claimCache[key]
+    if not state or state.version ~= version then
+        state = { version = version, nextAt = 0, attempts = 0 }
+        App.claimCache[key] = state
+    end
+    return state
+end
+
+function App.tryClaim(state, remote, ...)
+    if state.done or tick() < state.nextAt then return false end
+    state.attempts = math.min(state.attempts + 1, 7)
+    state.nextAt = tick() + math.min(1800, 30 * 2 ^ (state.attempts - 1))
+    return App.fire(remote, ...)
+end
+
 function App.claimRewards(data)
-    if type(data) ~= "table" then
-        return
+    local flags = tostring(App.Settings["Auto Claim Offline"])
+        .. tostring(App.Settings["Auto Claim Group"]) .. tostring(App.Settings["Auto Claim Daily"])
+    if flags ~= App.rewardFlags then App.rewardsAt = 0; App.rewardFlags = flags end
+    if type(data) ~= "table" or tick() < (App.rewardsAt or 0) then return end
+    App.rewardsAt = tick() + 300
+    if App.Settings["Auto Claim Offline"] == true then
+        local amount = tonumber(data.PendingOfflineEarnings)
+        if amount then
+            local state = App.claimState("offline", amount)
+            state.done = amount <= 0
+            if not state.done then
+                App.tryClaim(state, App.Net.ClaimOffline)
+                App.rewardsAt = math.min(App.rewardsAt, state.nextAt)
+            end
+        end
     end
-    if App.Settings["Auto Claim Offline"] == true
-    and (tonumber(data.PendingOfflineEarnings) or 0) > 0 and App.ready("offline", 3) then
-        App.fire(App.Net.ClaimOffline)
+    if App.Settings["Auto Claim Group"] == true and data.ClaimedGroupReward ~= nil then
+        local state = App.claimState("group", "once")
+        if data.ClaimedGroupReward == true then state.done = true end
+        App.tryClaim(state, App.Net.ClaimGroup)
+        if not state.done then App.rewardsAt = math.min(App.rewardsAt, state.nextAt) end
     end
-    if App.Settings["Auto Claim Group"] == true
-    and data.ClaimedGroupReward ~= true and App.ready("group", 5) then
-        App.fire(App.Net.ClaimGroup)
-    end
-    local dailyState = tostring(data.DailyRewardsClaimed) .. ":" .. tostring(data.LastDailyRewardClaim)
-    if App.Settings["Auto Claim Daily"] == true and App.dailyClaimState ~= dailyState
-    and App.ready("daily", 5) then
-        App.dailyClaimState = dailyState
-        App.fire(App.Net.ClaimDaily)
+    if App.Settings["Auto Claim Daily"] == true then
+        local last = tonumber(data.LastDailyRewardClaim)
+        local config = App.Modules.DailyRewardConfig
+        local cooldown = type(config) == "table" and tonumber(config.Cooldown)
+        if last and cooldown then
+            local state = App.claimState("daily", last)
+            local remaining = last > 0 and last + cooldown - os.time() or 0
+            if remaining <= 0 then
+                App.tryClaim(state, App.Net.ClaimDaily)
+                App.rewardsAt = math.min(App.rewardsAt, state.nextAt)
+            else
+                App.rewardsAt = math.min(App.rewardsAt, tick() + remaining)
+            end
+        end
     end
 end
 
@@ -827,55 +876,42 @@ function App.claimQuests(data)
     local config = App.Modules.QuestConfig
     if App.Settings["Auto Claim Quests"] ~= true or type(data) ~= "table"
     or type(data.Quests) ~= "table" or type(config) ~= "table"
-    or type(config.Periods) ~= "table" then
+    or type(config.Periods) ~= "table" or tick() < (App.questsAt or 0) then
         return false
     end
-
-    local pending = App.questClaimPending
-    if pending then
-        local state = data.Quests[pending.period]
-        if type(state) ~= "table" then
-            return false
-        end
-        if tonumber(state.expiresAt) == pending.expiresAt
-        and type(state.claimed) == "table" and state.claimed[pending.id] ~= true
-        and tick() - pending.at < 3 then
-            return false
-        end
-        if tonumber(state.expiresAt) == pending.expiresAt
-        and type(state.claimed) == "table" and state.claimed[pending.id] == true then
-            App.questClaimPending = nil
-            return false
-        end
-        App.questClaimPending = nil
-    end
-
-    if not App.ready("questClaim", 1) then
-        return false
-    end
+    App.questsAt = tick() + 30
+    local now = os.time()
     for _, period in { "Daily", "Weekly" } do
         local state = data.Quests[period]
         local periodConfig = config.Periods[period]
-        local expiresAt = type(state) == "table" and tonumber(state.expiresAt) or nil
-        if expiresAt and expiresAt > 0 and type(state.progress) == "table"
+        local expiresAt = type(state) == "table" and tonumber(state.expiresAt)
+        if expiresAt and expiresAt > now and type(state.progress) == "table"
         and type(state.claimed) == "table" and type(periodConfig) == "table" then
-            for _, quest in periodConfig.quests or {} do
-                local progress = type(quest) == "table" and tonumber(state.progress[quest.id]) or nil
-                local target = type(quest) == "table" and tonumber(quest.target) or nil
-                if type(quest) == "table" and type(quest.id) == "string"
-                and progress and target and progress >= target
-                and state.claimed[quest.id] ~= true then
-                    if App.fire(App.Net.ClaimQuest, period, quest.id, expiresAt) then
-                        App.questClaimPending = {
-                            period = period,
-                            id = quest.id,
-                            expiresAt = expiresAt,
-                            at = tick(),
-                        }
-                        App.setStatus("Claiming " .. period .. " quest: " .. tostring(quest.title or quest.id))
-                        return true
+            local cache = App.claimState("quests:" .. period, expiresAt)
+            if not cache.done then
+                cache.items = cache.items or {}
+                local complete = true
+                for _, quest in periodConfig.quests or {} do
+                    if type(quest) == "table" and type(quest.id) == "string" then
+                        local item = cache.items[quest.id]
+                        if not item then
+                            item = { nextAt = 0, attempts = 0 }
+                            cache.items[quest.id] = item
+                        end
+                        if state.claimed[quest.id] == true then item.done = true end
+                        if not item.done then
+                            complete = false
+                            local progress = tonumber(state.progress[quest.id]) or 0
+                            local target = tonumber(quest.target)
+                            if target and progress >= target
+                            and App.tryClaim(item, App.Net.ClaimQuest, period, quest.id, expiresAt) then
+                                App.questsAt = tick() + 2
+                                return true
+                            end
+                        end
                     end
                 end
+                cache.done = complete
             end
         end
     end
@@ -883,40 +919,30 @@ function App.claimQuests(data)
 end
 
 function App.redeemCodes(data)
-    local codesConfig = App.Modules.CodesConfig
+    local config = App.Modules.CodesConfig
     if App.Settings["Auto Redeem Codes"] ~= true or type(data) ~= "table"
-    or type(data.RedeemedCodes) ~= "table" or type(codesConfig) ~= "table" then
+    or type(data.RedeemedCodes) ~= "table" or type(config) ~= "table"
+    or tick() < (App.codesAt or 0) then
         return false
     end
-
-    local pending = App.codeRedeemPending
-    if pending then
-        if data.RedeemedCodes[pending.code] == true then
-            App.codeRedeemPending = nil
-            return false
+    if not App.codes then
+        App.codes = {}
+        for code in config do
+            if type(code) == "string" then App.codes[#App.codes + 1] = code end
         end
-        if tick() - pending.at < 4 then
-            return false
-        end
-        App.codeRedeemPending = nil
+        table.sort(App.codes)
     end
-    if not App.ready("redeemCode", 1) then
-        return false
-    end
-
-    local codes = {}
-    for code in codesConfig do
-        if type(code) == "string" then
-            codes[#codes + 1] = code
-        end
-    end
-    table.sort(codes)
-    for _, code in codes do
-        if data.RedeemedCodes[code] ~= true
-        and App.fire(App.Net.RedeemCode, code) then
-            App.codeRedeemPending = { code = code, at = tick() }
-            App.setStatus("Redeeming code " .. code)
-            return true
+    App.codesAt = math.huge
+    for _, code in App.codes do
+        local state = App.claimState("code:" .. code, "once")
+        if data.RedeemedCodes[code] == true then state.done = true end
+        if not state.done then
+            if App.tryClaim(state, App.Net.RedeemCode, code) then
+                App.codesAt = tick() + 2
+                App.setStatus("Redeeming code " .. code)
+                return true
+            end
+            App.codesAt = math.min(App.codesAt, state.nextAt)
         end
     end
     return false
@@ -1208,10 +1234,12 @@ function App.updateTowerStatus()
     if App.towerActive and App.towerRunFloor > 0 then
         state = tostring(App.towerName) .. " floor " .. tostring(App.towerRunFloor)
     end
-    App.towerStatus = "Tower: " .. state
+    local status = "Tower: " .. state
         .. "\n" .. tostring(App.towerRuns) .. " Runs  "
         .. tostring(App.towerFloors) .. " Floors Cleared  Best Floor "
         .. tostring(App.towerBest) .. "\nLast Run: " .. App.towerLastRun
+    if App.towerStatus == status then return end
+    App.towerStatus = status
     if App.towerStatusLabel and App.towerStatusLabel.setText then
         pcall(App.towerStatusLabel.setText, App.towerStatus)
     end
@@ -1332,6 +1360,8 @@ function App.deleteMap()
 end
 
 function App.cleanupTowerUi()
+    for _, disconnect in App.disconnects do pcall(disconnect) end
+    App.disconnects = {}
     if App.blackScreenGui then
         App.blackScreenGui:Destroy()
         App.blackScreenGui = nil
@@ -1741,6 +1771,8 @@ do
     App.acceptSelect = Accept.Select({ title = "Allowed Players", dropdowntitle = "Players", description = "Players allowed to trigger auto accept.", isVisible = true, search = true, options = { ["No players"] = false }, disableSelectedLayoutOrder = true, callback = function(name, enabled) App.Settings["Accept Players"][name] = enabled end })
 
     App.refreshOptions = function(data)
+        if App.optionsDirty == false then return end
+        App.optionsDirty = false
         local unitOptions = {}
         local tradeOptions = {}
         local inventoryStamp = {}
@@ -1793,8 +1825,47 @@ do
     Library.useNote.new({ content = "Auto Tower runs the same direct remote loop as BigFroot, so tower battle and reward UI never open.", duration = 7, placement = "search" })
 end
 
+do
+    local data = App.Modules.DataController
+    local client = App.Modules.DataClient
+    local root = type(client) == "table" and client.data
+    if type(oldRemake) == "table" and oldRemake.dataRoot == root
+    and type(oldRemake.claimCache) == "table" then
+        App.claimCache = oldRemake.claimCache
+    end
+    App.dataRoot = root
+    local function changed(key)
+        if generation ~= getgenv().AnimeDiceRemakeGeneration then return end
+        if key == "Inventory" then
+            App.optionsDirty = true
+        elseif key == "Quests" then
+            App.questsAt = 0
+        elseif key == "RedeemedCodes" then
+            App.codesAt = 0
+        else
+            App.rewardsAt = 0
+        end
+    end
+    if type(data) == "table" then
+        for _, key in { "Inventory", "Quests", "RedeemedCodes", "PendingOfflineEarnings",
+            "ClaimedGroupReward", "LastDailyRewardClaim", "DailyRewardsClaimed" } do
+            local ok, disconnect = pcall(function()
+                return data[key].Changed(function() changed(key) end)
+            end)
+            if ok and type(disconnect) == "function" then
+                App.disconnects[#App.disconnects + 1] = disconnect
+            end
+        end
+    end
+    for _, signal in { Players.PlayerAdded, Players.PlayerRemoving } do
+        local connection = signal:Connect(function() App.optionsDirty = true end)
+        App.disconnects[#App.disconnects + 1] = function() connection:Disconnect() end
+    end
+end
+
 task.spawn(function()
     local refreshAt = 0
+    local fallbackAt = 0
     while generation == getgenv().AnimeDiceRemakeGeneration do
         local ok, err = xpcall(function()
             local data = App.data()
@@ -1807,15 +1878,17 @@ task.spawn(function()
             App.allocateRebirthStats(data)
             App.equipBestGear(data)
             App.buyDice(data)
-            App.claimRewards(data)
-            App.claimQuests(data)
-            App.redeemCodes(data)
+            if App.ready("claimsScan", 2) then
+                App.claimRewards(data)
+                App.claimQuests(data)
+                App.redeemCodes(data)
+            end
             App.upgradeTree(data)
             App.fuse(data)
             App.rollAttribute(data, "Trait")
             App.rollAttribute(data, "Grade")
             App.tower(data)
-            App.updateTowerStatus()
+            if App.ready("towerStatus", 1) then App.updateTowerStatus() end
             App.updateBlackScreen()
             if App.Settings["FPS Boost"] == true then App.boostFps() end
             if App.Settings["Delete Map"] == true then App.deleteMap() end
@@ -1827,7 +1900,11 @@ task.spawn(function()
                 App.fire(App.Net.AdvanceTrade)
             end
             if tick() >= refreshAt then
-                refreshAt = tick() + 2
+                refreshAt = tick() + 10
+                if tick() >= fallbackAt then
+                    fallbackAt = tick() + 300
+                    App.optionsDirty = true
+                end
                 App.refreshOptions(data)
             end
             if type(data) ~= "table" then
@@ -1839,10 +1916,12 @@ task.spawn(function()
         if not ok then
             App.lastError = tostring(err)
             App.setStatus("Worker error")
-            warn("[AnimeDiceRemake] " .. tostring(err))
+            if App.ready("workerWarning", 30) then warn("[AnimeDiceRemake] " .. tostring(err)) end
             task.wait(1)
         else
-            task.wait(0.25)
+            local fast = App.Settings["Auto Trait Reroll"] == true
+                or App.Settings["Auto Grade Reroll"] == true or App.trade.state ~= nil
+            task.wait(fast and 0.25 or App.Settings["Auto Tower"] == true and 0.6 or 1)
         end
     end
 end)
